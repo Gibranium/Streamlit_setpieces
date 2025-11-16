@@ -62,7 +62,7 @@ try:
     if regular_font_loaded:
         matplotlib.rcParams['font.family'] = fe_regular.name
     else:
-        st.info("ℹ️ Custom fonts not found in repository. Using system default fonts.")
+        st.warning("⚠️ Custom fonts not found. Using system default fonts.")
         
 except Exception as e:
     # Fallback to default font if loading fails
