@@ -23,10 +23,6 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Fonts (if you add them later, ignore local font files)
-*.ttf
-*.otf
-
 # Jupyter Notebooks
 .ipynb_checkpoints/
 *.ipynb
@@ -35,3 +31,6 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# NOTE: Font files (.ttf, .otf) are NOT ignored - they should be committed to the repo
+# so they're available on Streamlit Cloud

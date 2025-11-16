@@ -22,14 +22,15 @@ class FontFallback:
 try:
     # Try to load custom fonts from multiple possible locations
     font_paths = [
-        '/Users/davidegualano/Documents/Python FTBLData/SourceSansPro-Regular.ttf',
-        './fonts/SourceSansPro-Regular.ttf',
-        'SourceSansPro-Regular.ttf'
+        'SourceSansPro-Regular.ttf',  # In repository root (Streamlit Cloud)
+        './SourceSansPro-Regular.ttf',
+        '/Users/davidegualano/Documents/Python FTBLData/SourceSansPro-Regular.ttf',  # Local dev
     ]
     font_paths_semibold = [
-        '/Users/davidegualano/Documents/Python FTBLData/SourceSansPro-SemiBold.ttf',
-        './fonts/SourceSansPro-SemiBold.ttf',
-        'SourceSansPro-SemiBold.ttf'
+        'SourceSansPro-SemiBold.ttf',  # In repository root (Streamlit Cloud) - note capital B
+        './SourceSansPro-SemiBold.ttf',
+        'SourceSansPro-Semibold.ttf',  # Try lowercase 'b' as well
+        '/Users/davidegualano/Documents/Python FTBLData/SourceSansPro-SemiBold.ttf',  # Local dev
     ]
     
     regular_font_loaded = False
@@ -53,10 +54,15 @@ try:
             semibold_font_loaded = True
             break
     
+    # If semibold didn't load but regular did, use regular for both
+    if not semibold_font_loaded and regular_font_loaded:
+        fe_semibold = fe_regular
+        st.info("ℹ️ Using regular font for both regular and bold text.")
+    
     if regular_font_loaded:
         matplotlib.rcParams['font.family'] = fe_regular.name
     else:
-        st.warning("⚠️ Custom fonts not found. Using system default fonts.")
+        st.info("ℹ️ Custom fonts not found in repository. Using system default fonts.")
         
 except Exception as e:
     # Fallback to default font if loading fails
