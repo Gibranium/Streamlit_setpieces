@@ -14,6 +14,11 @@ from mplsoccer import VerticalPitch
 import os
 
 # Load custom fonts for visualization with error handling
+class FontFallback:
+    """Fallback font object when custom fonts can't be loaded"""
+    def __init__(self):
+        self.name = 'sans-serif'
+
 try:
     # Try to load custom fonts from multiple possible locations
     font_paths = [
@@ -29,6 +34,10 @@ try:
     
     regular_font_loaded = False
     semibold_font_loaded = False
+    
+    # Initialize with fallback
+    fe_regular = FontFallback()
+    fe_semibold = FontFallback()
     
     for path in font_paths:
         if os.path.exists(path):
@@ -47,15 +56,12 @@ try:
     if regular_font_loaded:
         matplotlib.rcParams['font.family'] = fe_regular.name
     else:
-        # Fallback to default font
-        fe_regular = type('obj', (object,), {'name': 'sans-serif'})
-        fe_semibold = type('obj', (object,), {'name': 'sans-serif'})
         st.warning("⚠️ Custom fonts not found. Using system default fonts.")
         
 except Exception as e:
     # Fallback to default font if loading fails
-    fe_regular = type('obj', (object,), {'name': 'sans-serif'})
-    fe_semibold = type('obj', (object,), {'name': 'sans-serif'})
+    fe_regular = FontFallback()
+    fe_semibold = FontFallback()
     st.warning(f"⚠️ Could not load custom fonts: {e}. Using system default fonts.")
 
 # Function to format season ID into a readable format
