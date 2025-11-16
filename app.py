@@ -437,11 +437,8 @@ else:
     # Calculate median for ranking
     team_medians = df1.groupby('team_name')[metric_column].median().sort_values(ascending=False)
     
-    # For possession duration, show only top 20 teams
-    if throw_in_filter == "Possession duration after final third throw-ins":
-        teams = team_medians.nlargest(20).index.tolist()
-    else:
-        teams = team_medians.index.tolist()
+    # Show only top 20 teams
+    teams = team_medians.nlargest(20).index.tolist()
     
     # Prepare data for box plot
     data_to_plot = []
