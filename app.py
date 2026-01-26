@@ -9,7 +9,8 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 from PIL import Image
-import urllib.request
+import requests
+from io import BytesIO
 from mplsoccer import VerticalPitch
 import os
 
@@ -81,6 +82,17 @@ def format_season_id(season_id):
     # Format as 20/21
     formatted_season = f"{start_year}/{end_year}"
     return formatted_season
+
+# Helper function to load team logo from FotMob
+def load_team_logo(team_id, timeout=10):
+    """Load team logo from FotMob with proper error handling"""
+    fotmob_url = 'https://images.fotmob.com/image_resources/logo/teamlogo/'
+    try:
+        response = requests.get(f"{fotmob_url}{team_id}.png", timeout=timeout)
+        response.raise_for_status()
+        return Image.open(BytesIO(response.content)).convert('RGBA')
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
 
 st.title("2025/26 Throw-ins visualizations")
 st.subheader("Select a league or more leagues to visualize throw-ins data!")
@@ -256,13 +268,24 @@ if 'fotmob_id' in team_table.columns:
             x_pos = row[x_axis]
             y_pos = row[y_axis]
             
-            # Load the team logo
-            team_logo = Image.open(urllib.request.urlopen(f"{fotmob_url}{team_id}.png")).convert('RGBA')
+            # Load the team logo using requests
+            team_logo = load_team_logo(team_id)
             
-            # Create offset box for the logo
-            imagebox = OffsetImage(team_logo, zoom=0.15)  # Adjust zoom for logo size
-            ab = AnnotationBbox(imagebox, (x_pos, y_pos), frameon=False, zorder=4)
-            ax.add_artist(ab)
+            if team_logo is not None and not isinstance(team_logo, tuple):
+                # Create offset box for the logo
+                imagebox = OffsetImage(team_logo, zoom=0.15)  # Adjust zoom for logo size
+                ab = AnnotationBbox(imagebox, (x_pos, y_pos), frameon=False, zorder=4)
+                ax.add_artist(ab)
+            else:
+                # If logo loading fails, fall back to text annotation for outliers
+                x_threshold = team_table[x_axis].quantile(0.95)
+                y_threshold = team_table[y_axis].quantile(0.95)
+                if row[x_axis] >= x_threshold or row[y_axis] >= y_threshold:
+                    ax.annotate(row['team_name'],
+                               xy=(x_pos, y_pos),
+                               xytext=(5, 5), textcoords='offset points',
+                               fontsize=9, color='#000000',
+                               bbox=dict(boxstyle='round,pad=0.3', fc='#FFFFFF', ec='#ACA7A5', alpha=0.7, lw=0.5))
             
         except Exception as e:
             # If logo loading fails, fall back to text annotation for outliers
@@ -644,12 +667,18 @@ else:
                     logo_size = 0.06
                     
                     image_ax = fig2.add_axes([logo_x, logo_y, logo_size, logo_size], fc='None', anchor='C')
-                    fotmob_url = 'https://images.fotmob.com/image_resources/logo/teamlogo/'
-                    player_face = Image.open(urllib.request.urlopen(f"{fotmob_url}{team_id}.png")).convert('RGBA')
-                    image_ax.imshow(player_face)
-                    image_ax.axis("off")
+                    
+                    # Use requests to load the logo
+                    team_logo = load_team_logo(team_id)
+                    
+                    if team_logo is not None and not isinstance(team_logo, tuple):
+                        image_ax.imshow(team_logo)
+                        image_ax.axis("off")
+                    else:
+                        st.warning(f"Could not load logo for {selected_team}")
+                        image_ax.axis("off")
                 except Exception as e:
-                    st.warning(f"Could not load logo for {selected_team}")
+                    st.warning(f"Could not load logo for {selected_team}: {e}")
             
             # Display the plot in Streamlit
             st.pyplot(fig2)
