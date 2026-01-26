@@ -242,8 +242,8 @@ ax.scatter(team_table[x_axis], team_table[y_axis], zorder=3, s=80,
            fc='#1565C0', ec="#000000", alpha=0.70, lw=0.5)
 
 # Add text labels for outlier teams (top performers)
-x_threshold = team_table[x_axis].quantile(0.90)
-y_threshold = team_table[y_axis].quantile(0.90)
+x_threshold = team_table[x_axis].quantile(0.75)
+y_threshold = team_table[y_axis].quantile(0.75)
 outliers = team_table[(team_table[x_axis] >= x_threshold) | 
                       (team_table[y_axis] >= y_threshold)]
 
