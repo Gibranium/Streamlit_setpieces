@@ -7,10 +7,6 @@ import matplotlib
 import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from matplotlib.offsetbox import OffsetImage, AnnotationBbox
-from PIL import Image
-import requests
-from io import BytesIO
 from mplsoccer import VerticalPitch
 import os
 
@@ -82,17 +78,6 @@ def format_season_id(season_id):
     # Format as 20/21
     formatted_season = f"{start_year}/{end_year}"
     return formatted_season
-
-# Helper function to load team logo from FotMob
-def load_team_logo(team_id, timeout=10):
-    """Load team logo from FotMob with proper error handling"""
-    fotmob_url = 'https://images.fotmob.com/image_resources/logo/teamlogo/'
-    try:
-        response = requests.get(f"{fotmob_url}{team_id}.png", timeout=timeout)
-        response.raise_for_status()
-        return Image.open(BytesIO(response.content)).convert('RGBA')
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
 
 st.title("2025/26 Throw-ins visualizations")
 st.subheader("Select a league or more leagues to visualize throw-ins data!")
@@ -252,65 +237,22 @@ ax.spines["left"].set_color('#ACA7A5')
 ax.grid(lw=0.1, color="#ACA7A5", axis='x', ls="-")
 ax.grid(lw=0.1, color="#ACA7A5", axis='y', ls="-")
 
-# Plot scatter points with selected axes (s=0 since logos are the visual markers)
-ax.scatter(team_table[x_axis], team_table[y_axis], zorder=3, s=0, 
+# Plot scatter points with selected axes
+ax.scatter(team_table[x_axis], team_table[y_axis], zorder=3, s=80, 
            fc='#1565C0', ec="#000000", alpha=0.70, lw=0.5)
 
-# Adding team logos on scatter points
-fotmob_url = 'https://images.fotmob.com/image_resources/logo/teamlogo/'
-logo_size = 0.03  # Size of the logo relative to the plot
+# Add text labels for outlier teams (top performers)
+x_threshold = team_table[x_axis].quantile(0.90)
+y_threshold = team_table[y_axis].quantile(0.90)
+outliers = team_table[(team_table[x_axis] >= x_threshold) | 
+                      (team_table[y_axis] >= y_threshold)]
 
-# Check if fotmob_id column exists in the dataframe
-if 'fotmob_id' in team_table.columns:
-    for idx, row in team_table.iterrows():
-        try:
-            team_id = row['fotmob_id']
-            x_pos = row[x_axis]
-            y_pos = row[y_axis]
-            
-            # Load the team logo using requests
-            team_logo = load_team_logo(team_id)
-            
-            if team_logo is not None and not isinstance(team_logo, tuple):
-                # Create offset box for the logo
-                imagebox = OffsetImage(team_logo, zoom=0.15)  # Adjust zoom for logo size
-                ab = AnnotationBbox(imagebox, (x_pos, y_pos), frameon=False, zorder=4)
-                ax.add_artist(ab)
-            else:
-                # If logo loading fails, fall back to text annotation for outliers
-                x_threshold = team_table[x_axis].quantile(0.95)
-                y_threshold = team_table[y_axis].quantile(0.95)
-                if row[x_axis] >= x_threshold or row[y_axis] >= y_threshold:
-                    ax.annotate(row['team_name'],
-                               xy=(x_pos, y_pos),
-                               xytext=(5, 5), textcoords='offset points',
-                               fontsize=9, color='#000000',
-                               bbox=dict(boxstyle='round,pad=0.3', fc='#FFFFFF', ec='#ACA7A5', alpha=0.7, lw=0.5))
-            
-        except Exception as e:
-            # If logo loading fails, fall back to text annotation for outliers
-            x_threshold = team_table[x_axis].quantile(0.95)
-            y_threshold = team_table[y_axis].quantile(0.95)
-            if row[x_axis] >= x_threshold or row[y_axis] >= y_threshold:
-                ax.annotate(row['team_name'],
-                           xy=(x_pos, y_pos),
-                           xytext=(5, 5), textcoords='offset points',
-                           fontsize=9, color='#000000',
-                           bbox=dict(boxstyle='round,pad=0.3', fc='#FFFFFF', ec='#ACA7A5', alpha=0.7, lw=0.5))
-else:
-    # If fotmob_id column doesn't exist, use text annotations for outliers only
-    st.warning("⚠️ Note: 'fotmob_id' column not found in your CSV. Using text labels instead of team logos. Please add a 'fotmob_id' column to your data to display team logos.")
-    x_threshold = team_table[x_axis].quantile(0.95)
-    y_threshold = team_table[y_axis].quantile(0.95)
-    outliers = team_table[(team_table[x_axis] >= x_threshold) | 
-                          (team_table[y_axis] >= y_threshold)]
-    
-    for idx, row in outliers.iterrows():
-        ax.annotate(row['team_name'],
-                    xy=(row[x_axis], row[y_axis]),
-                    xytext=(5, 5), textcoords='offset points',
-                    fontsize=9, color='#000000',
-                    bbox=dict(boxstyle='round,pad=0.3', fc='#FFFFFF', ec='#ACA7A5', alpha=0.7, lw=0.5))
+for idx, row in outliers.iterrows():
+    ax.annotate(row['team_name'],
+                xy=(row[x_axis], row[y_axis]),
+                xytext=(5, 5), textcoords='offset points',
+                fontsize=9, color='#000000',
+                bbox=dict(boxstyle='round,pad=0.3', fc='#FFFFFF', ec='#ACA7A5', alpha=0.7, lw=0.5))
 
 # Format axis labels (replace underscores with spaces and capitalize)
 x_label = x_axis.replace('_', ' ').title()
@@ -344,7 +286,7 @@ if len(first_contact_data) == 0:
 else:
     # Sort by volume and get top 20
     first_contact_by_volume = first_contact_data.sort_values(by='set_pieces_per_game', ascending=False).head(20)
-    # Sort by first contact ratio (removed redundant .head(20))
+    # Sort by first contact ratio
     plot_data_fc = first_contact_by_volume.sort_values(by='first_contact_ratio', ascending=False)
     
     # Create figure and axis
@@ -536,7 +478,7 @@ else:
         formatted_season_display = set_pieces['formatted_season'].iloc[0] if 'formatted_season' in set_pieces.columns and len(set_pieces) > 0 else ''
         season_text = f" {formatted_season_display}" if formatted_season_display else ""
         
-        # Calculate title x position based on title length (FIXED: now actually uses the calculated value)
+        # Calculate title x position based on title length
         title_x = 0.0355 if throw_in_filter == "Possession duration after final third throw-ins" else 0.046
         
         fig_vaep.suptitle(title_text, 
@@ -657,28 +599,6 @@ else:
                      fontsize=20, va='center', ha='left', fontfamily=fe_regular.name)
             fig2.text(0, 0.15, 'X: @gualanodavide | Bluesky: @gualanodavide.bsky.social | Linkedin: www.linkedin.com/in/davide-gualano-a2454b187 | Newsletter: the-cutback.beehiiv.com', 
                      va='center', ha='left', fontsize=12, fontfamily=fe_regular.name)
-            
-            # Adding the club logo
-            if 'fotmob_id' in team_table.columns:
-                try:
-                    team_id = team_table[team_table['team_name'] == selected_team]['fotmob_id'].iloc[0]
-                    logo_x = 0.01
-                    logo_y = 0.86
-                    logo_size = 0.06
-                    
-                    image_ax = fig2.add_axes([logo_x, logo_y, logo_size, logo_size], fc='None', anchor='C')
-                    
-                    # Use requests to load the logo
-                    team_logo = load_team_logo(team_id)
-                    
-                    if team_logo is not None and not isinstance(team_logo, tuple):
-                        image_ax.imshow(team_logo)
-                        image_ax.axis("off")
-                    else:
-                        st.warning(f"Could not load logo for {selected_team}")
-                        image_ax.axis("off")
-                except Exception as e:
-                    st.warning(f"Could not load logo for {selected_team}: {e}")
             
             # Display the plot in Streamlit
             st.pyplot(fig2)
