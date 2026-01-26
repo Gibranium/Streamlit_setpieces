@@ -79,7 +79,7 @@ def format_season_id(season_id):
     formatted_season = f"{start_year}/{end_year}"
     return formatted_season
 
-st.title("2025/26 Throw-ins visualizations")
+st.title("2025/26 Throw-ins visualizations until Sunday 25th of January 2026")
 st.subheader("Select a league or more leagues to visualize throw-ins data!")
 
 # Cache the data loading
