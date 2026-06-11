@@ -1,0 +1,18 @@
+# Davide Gualano — throw-in app theme
+# Tokens taken from gibranium.github.io/style.css
+
+[theme]
+base = "light"
+primaryColor = "#C8401F"            # shot-map vermilion
+backgroundColor = "#D7D1CF"         # concrete gray paper
+secondaryBackgroundColor = "#CDC7C4" # slightly darker concrete for widgets/expanders
+textColor = "#15130F"               # ink
+
+# Dark "paper-dark" sidebar, like the portfolio footer/CTA panels.
+# Requires Streamlit >= 1.46. On older versions this block is ignored
+# and the CSS fallback in app.py takes over.
+[theme.sidebar]
+backgroundColor = "#15130F"
+secondaryBackgroundColor = "#262320"
+textColor = "#E9E4E0"
+primaryColor = "#C8401F"
