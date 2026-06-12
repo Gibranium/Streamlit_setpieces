@@ -364,31 +364,36 @@ else:
 
 @st.cache_data(show_spinner='Calculating first contact statistics...')
 def process_first_contact_data(competitions_tuple, df_atomic):
-    """Process atomic data for first contact analysis. Only recalculates when competitions change."""
+    """Process atomic data for first contact analysis. Only recalculates when competitions change.
+
+    max_vaep_next_5s = the highest vaep_value among the same team's later actions
+    within 5 seconds of each throw-in, in the same game and period. Computed per
+    (game, period, team) group with a sorted searchsorted window instead of a
+    per-row full-frame scan — same result, a fraction of the time and memory.
+    """
     competitions = list(competitions_tuple)
     dfa_atomic = df_atomic[df_atomic['competition_id'].isin(competitions)].copy()
 
-    dfa_atomic['max_vaep_next_5s'] = np.nan
-    set_pieces_mask = dfa_atomic['type_name'].isin(['throw_in'])
+    n = len(dfa_atomic)
+    max_next = np.zeros(n, dtype=float)
+    # map original index label -> row position, so we can write results back in order
+    positions = {ix: i for i, ix in enumerate(dfa_atomic.index)}
 
-    for idx in tqdm(dfa_atomic[set_pieces_mask].index, desc='Calculating VAEP'):
-        current_time = dfa_atomic.loc[idx, 'time_seconds']
-        current_game = dfa_atomic.loc[idx, 'game_id']
-        current_period = dfa_atomic.loc[idx, 'period_id']
-        current_team = dfa_atomic.loc[idx, 'team_id']
+    for _, g in dfa_atomic.groupby(['game_id', 'period_id', 'team_id'], sort=False):
+        g = g.sort_values('time_seconds')
+        t = g['time_seconds'].to_numpy()
+        v = g['vaep_value'].to_numpy()
+        idxs = g.index.to_numpy()
+        is_ti = g['type_name'].isin(['throw_in']).to_numpy()
 
-        window = dfa_atomic[
-            (dfa_atomic['game_id'] == current_game) &
-            (dfa_atomic['period_id'] == current_period) &
-            (dfa_atomic['team_id'] == current_team) &
-            (dfa_atomic['time_seconds'] > current_time) &
-            (dfa_atomic['time_seconds'] <= current_time + 5)
-        ]
+        for j in np.where(is_ti)[0]:
+            ct = t[j]
+            lo = np.searchsorted(t, ct, side='right')        # first action strictly after ct
+            hi = np.searchsorted(t, ct + 5, side='right')     # first action after ct + 5s
+            if hi > lo:
+                max_next[positions[idxs[j]]] = v[lo:hi].max()
 
-        if len(window) > 0:
-            dfa_atomic.loc[idx, 'max_vaep_next_5s'] = window['vaep_value'].max()
-
-    dfa_atomic['max_vaep_next_5s'] = dfa_atomic['max_vaep_next_5s'].fillna(0)
+    dfa_atomic['max_vaep_next_5s'] = max_next
     dfa_atomic['vaep_difference'] = dfa_atomic['max_vaep_next_5s'] - dfa_atomic['vaep_value']
 
     dfx = dfa_atomic[(dfa_atomic['type_name'].isin(['throw_in'])) & (dfa_atomic['is_inbox'] == True)]
