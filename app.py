@@ -1,14 +1,16 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from tqdm import tqdm
-from scipy import stats
 import matplotlib
 import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from mplsoccer import VerticalPitch
 import os
+import io
+import re
+import glob
+import player_dashboard as pdash
 
 # ──────────────────────────────────────────────
 # Design tokens — taken from gibranium.github.io/style.css
@@ -234,6 +236,68 @@ h1 em, h2 em {{ font-style: normal; color: {ACCENT}; }}
     margin-bottom: 2px;
 }}
 .side-logo span {{ color: {ACCENT}; }}
+.side-cta {{
+    display: block;
+    background: {ACCENT};
+    color: #fff !important;
+    text-decoration: none;
+    font-family: 'Archivo', sans-serif;
+    font-weight: 800;
+    font-size: 14px;
+    letter-spacing: -0.01em;
+    padding: 11px 14px;
+    margin: 22px 0 4px 0;
+    border: 1.5px solid {ACCENT};
+}}
+.side-cta:hover {{ background: {ACCENT_DARK}; border-color: {ACCENT_DARK}; }}
+.side-cta span {{
+    display: block;
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 400;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    opacity: 0.85;
+    margin-top: 2px;
+}}
+.side-contact {{
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    color: {ON_DARK_MUTED};
+    line-height: 1.9;
+    margin: 10px 0 0 0;
+}}
+.side-contact a {{ color: {ON_DARK_MUTED}; text-decoration: none; }}
+.side-contact a:hover {{ color: {ON_DARK}; text-decoration: underline; }}
+.hire-band {{
+    border: 1.5px solid {INK};
+    border-left: 6px solid {ACCENT};
+    padding: 18px 22px;
+    margin: 26px 0 6px 0;
+}}
+.hire-band h3 {{
+    font-family: 'Archivo', sans-serif;
+    font-weight: 900;
+    font-size: 22px;
+    margin: 0 0 4px 0;
+    color: {INK};
+}}
+.hire-band p {{ color: {MUTED}; font-size: 15px; margin: 0 0 12px 0; max-width: 640px; }}
+.hire-band a.cta {{
+    display: inline-block;
+    background: {ACCENT};
+    color: #fff !important;
+    text-decoration: none;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 10px 18px;
+}}
+.hire-band a.cta:hover {{ background: {ACCENT_DARK}; }}
+.hire-band .lines {{ font-size: 14px; color: {MUTED}; margin-top: 12px; }}
+.hire-band .lines a {{ color: {ACCENT}; }}
 .footer-mono {{
     font-family: 'IBM Plex Mono', monospace;
     font-size: 11px;
@@ -272,6 +336,13 @@ section[data-testid="stSidebar"] label {{
 [data-testid="stHeader"] {{ background: {BG}; }}
 </style>
 """, unsafe_allow_html=True)
+
+
+# Design tokens passed to player_dashboard so the ramp and fonts live here only.
+DASH_STYLE = dict(BG=BG, INK=INK, ACCENT=ACCENT, MUTED=MUTED, GRID=GRID,
+                  TRACK='#E6E2E0', afm_at=afm_at,
+                  fe_regular=fe_regular.name, fe_semibold=fe_semibold.name,
+                  fe_display=fe_display.name)
 
 
 def section(num, label, title, subtitle=None):
@@ -314,6 +385,41 @@ def load_data():
     df_atomic = pd.read_csv('throwinsatomic2526.csv', index_col=0)
     return set_pieces, team_table, df_atomic
 
+# Optional player-level table exported from the evaluation notebooks.
+# If the file isn't there the Players tab just runs on set_pieces alone.
+PLAYER_TABLE_CSV = 'throwinsplayers2526.csv'
+
+
+@st.cache_data
+def load_dashboards():
+    """One frame per position group, keyed by the suffix of dashboard_<GRP>.parquet.
+
+    The `_`-prefixed columns are precomputed here so the filters don't re-derive
+    them on every rerun; parquet returns the list columns as numpy arrays, which
+    is what pdash.as_list is built to take."""
+    out = {}
+    for path in sorted(glob.glob('dashboard_*.parquet')):
+        group = os.path.basename(path)[len('dashboard_'):-len('.parquet')]
+        if group not in pdash.DASHBOARDS:
+            continue
+        df = pd.read_parquet(path).reset_index(drop=True)
+        df['_name'] = df['player_name'].map(pdash.clean_str)
+        df['_team'] = df['team_name'].map(pdash.clean_str)
+        df['_role'] = df['position'].map(lambda v: pdash.clean_str(v, group))
+        df['_seasons'] = df['season_id'].map(pdash.as_list)
+        df['_comps'] = df['competition_id'].map(pdash.as_list)
+        df['_label'] = df.apply(pdash.stint_label, axis=1)
+        out[group] = df
+    return out
+
+
+@st.cache_data
+def load_player_table():
+    if not os.path.exists(PLAYER_TABLE_CSV):
+        return None
+    return pd.read_csv(PLAYER_TABLE_CSV)
+
+
 set_pieces, team_table, df_atomic = load_data()
 
 # ──────────────────────────────────────────────
@@ -323,538 +429,814 @@ st.sidebar.markdown(
     '<p class="side-logo">Davide Gualano<span>.</span></p>'
     '<p style="font-family:\'IBM Plex Mono\',monospace; font-size:11px; '
     f'letter-spacing:0.08em; text-transform:uppercase; color:{ON_DARK_MUTED}; margin:0;">'
-    'Set pieces — 2025/26</p>',
+    'Football data analysis</p>',
     unsafe_allow_html=True,
 )
 
-available_competitions = sorted(set_pieces['competition_id'].unique().tolist())
+MODE_THROWINS, MODE_SCOUT = 'Throw-ins', 'Player scouting'
+side_label('Section')
+mode = st.sidebar.radio('Section:', [MODE_THROWINS, MODE_SCOUT],
+                       index=0, label_visibility='collapsed')
 
-side_label('Competitions')
-selected_competitions = st.sidebar.multiselect(
-    'Select Competition(s):',
-    options=available_competitions,
-    default=['ITA-Serie A'] if 'ITA-Serie A' in available_competitions else [available_competitions[0]],
-    label_visibility='collapsed',
-)
+if mode == MODE_THROWINS:
+    available_competitions = sorted(set_pieces['competition_id'].unique().tolist())
 
-# Filter data based on selected competitions
-if selected_competitions:
-    set_pieces = set_pieces[set_pieces['competition_id'].isin(selected_competitions)]
+    side_label('Competitions')
+    selected_competitions = st.sidebar.multiselect(
+        'Select Competition(s):',
+        options=available_competitions,
+        default=['ITA-Serie A'] if 'ITA-Serie A' in available_competitions else [available_competitions[0]],
+        label_visibility='collapsed',
+    )
 
-    if len(set_pieces) == 0:
-        st.error(f"No data available for the selected competition(s): {', '.join(selected_competitions)}")
-        st.stop()
+    # Filter data based on selected competitions
+    if selected_competitions:
+        set_pieces = set_pieces[set_pieces['competition_id'].isin(selected_competitions)]
 
-    if 'fotmob_id' in set_pieces.columns:
-        unique_fotmob_ids = set_pieces['fotmob_id'].unique()
-        if 'fotmob_id' in team_table.columns:
-            team_table = team_table[team_table['fotmob_id'].isin(unique_fotmob_ids)]
+        if len(set_pieces) == 0:
+            st.error(f"No data available for the selected competition(s): {', '.join(selected_competitions)}")
+            st.stop()
+
+        if 'fotmob_id' in set_pieces.columns:
+            unique_fotmob_ids = set_pieces['fotmob_id'].unique()
+            if 'fotmob_id' in team_table.columns:
+                team_table = team_table[team_table['fotmob_id'].isin(unique_fotmob_ids)]
+            else:
+                st.warning("'fotmob_id' column not found in team_table. Cannot filter teams by competition.")
         else:
-            st.warning("'fotmob_id' column not found in team_table. Cannot filter teams by competition.")
+            st.warning("'fotmob_id' column not found in set_pieces. Cannot filter teams by competition.")
+
+        if len(team_table) == 0:
+            st.error(f"No teams found for the selected competition(s): {', '.join(selected_competitions)}")
+            st.stop()
     else:
-        st.warning("'fotmob_id' column not found in set_pieces. Cannot filter teams by competition.")
-
-    if len(team_table) == 0:
-        st.error(f"No teams found for the selected competition(s): {', '.join(selected_competitions)}")
+        st.warning('Please select at least one competition.')
         st.stop()
+
+
+    @st.cache_data(show_spinner='Calculating first contact statistics...')
+    def process_first_contact_data(competitions_tuple, df_atomic):
+        """Process atomic data for first contact analysis. Only recalculates when competitions change.
+
+        max_vaep_next_5s = the highest vaep_value among the same team's later actions
+        within 5 seconds of each throw-in, in the same game and period. Computed per
+        (game, period, team) group with a sorted searchsorted window instead of a
+        per-row full-frame scan — same result, a fraction of the time and memory.
+        """
+        competitions = list(competitions_tuple)
+        dfa_atomic = df_atomic[df_atomic['competition_id'].isin(competitions)].copy()
+
+        n = len(dfa_atomic)
+        max_next = np.zeros(n, dtype=float)
+        # map original index label -> row position, so we can write results back in order
+        positions = {ix: i for i, ix in enumerate(dfa_atomic.index)}
+
+        for _, g in dfa_atomic.groupby(['game_id', 'period_id', 'team_id'], sort=False):
+            g = g.sort_values('time_seconds')
+            t = g['time_seconds'].to_numpy()
+            v = g['vaep_value'].to_numpy()
+            idxs = g.index.to_numpy()
+            is_ti = g['type_name'].isin(['throw_in']).to_numpy()
+
+            for j in np.where(is_ti)[0]:
+                ct = t[j]
+                lo = np.searchsorted(t, ct, side='right')        # first action strictly after ct
+                hi = np.searchsorted(t, ct + 5, side='right')     # first action after ct + 5s
+                if hi > lo:
+                    max_next[positions[idxs[j]]] = v[lo:hi].max()
+
+        dfa_atomic['max_vaep_next_5s'] = max_next
+        dfa_atomic['vaep_difference'] = dfa_atomic['max_vaep_next_5s'] - dfa_atomic['vaep_value']
+
+        dfx = dfa_atomic[(dfa_atomic['type_name'].isin(['throw_in'])) & (dfa_atomic['is_inbox'] == True)]
+        df2a = dfx[dfx['next_team_name'] == dfx['team_name']]
+        df2 = df2a[df2a['next_type_name'].isin(['receival', 'pass', 'goal', 'shot'])]
+
+        games_played = dfa_atomic.groupby(['team_name'])['game_id'].nunique().reset_index(name='games_played')
+        first_contacta = dfx.groupby('team_name').size().reset_index(name='set_pieces')
+        first_contactb = df2.groupby('team_name').size().reset_index(name='first_contact_won')
+        first_contact0 = first_contacta.merge(first_contactb, on='team_name', how='left').fillna(0)
+        first_contact = first_contact0.merge(games_played, on='team_name', how='left').fillna(0)
+        first_contact['first_contact_ratio'] = first_contact['first_contact_won'] / first_contact['set_pieces']
+        first_contact['set_pieces_per_game'] = first_contact['set_pieces'] / first_contact['games_played']
+
+        return first_contact, dfa_atomic
+
+    first_contact_data, dfa_atomic = process_first_contact_data(tuple(selected_competitions), df_atomic)
+
+    # Remaining sidebar controls (options depend on filtered data)
+    numeric_columns = [col for col in team_table.columns
+                       if col not in ['team_name', 'games_played', 'fotmob_id']
+                       and team_table[col].dtype in ['float64', 'int64']]
+
+    side_label('Scatter axes')
+    x_axis = st.sidebar.selectbox(
+        'X-Axis:',
+        options=numeric_columns,
+        index=numeric_columns.index('xG_per_throw_in') if 'xG_per_throw_in' in numeric_columns else 0,
+    )
+    y_axis = st.sidebar.selectbox(
+        'Y-Axis:',
+        options=numeric_columns,
+        index=numeric_columns.index('throw_ins_per_game') if 'throw_ins_per_game' in numeric_columns else 1,
+    )
+
+    side_label('Value creation analysis')
+    throw_in_filter = st.sidebar.radio(
+        'Select analysis type:',
+        options=[
+            'All final third throw-ins (VAEP)',
+            'Final third throw-ins excluding box (VAEP)',
+            'Possession duration after final third throw-ins',
+        ],
+        index=0,
+        label_visibility='collapsed',
+    )
+
+    side_label('Team maps')
+    available_teams = sorted(team_table['team_name'].unique().tolist())
+    selected_team = st.sidebar.selectbox('Select Team:', options=available_teams, index=0,
+                                         label_visibility='collapsed') if available_teams else None
+
 else:
-    st.warning('Please select at least one competition.')
-    st.stop()
+    groups = load_dashboards()
+    scout_frame = scout_pool = pd.DataFrame()
+    scout_group = scout_name = scout_season = scout_team = None
+    scout_roles = []
 
+    if not groups:
+        st.sidebar.warning('No dashboard_*.parquet exports found.')
+    else:
+        side_label('Position group')
+        scout_group = st.sidebar.selectbox(
+            'Position group:', sorted(groups), label_visibility='collapsed',
+            format_func=lambda g: pdash.DASHBOARDS[g]['label'],
+        )
+        scout_frame = groups[scout_group]
 
-@st.cache_data(show_spinner='Calculating first contact statistics...')
-def process_first_contact_data(competitions_tuple, df_atomic):
-    """Process atomic data for first contact analysis. Only recalculates when competitions change.
+        # Pool filters — these decide what the percentiles are measured against
+        side_label('Pool — percentiles measured against')
+        mins_lo = int(np.floor(scout_frame['minutes_played'].min()))
+        mins_hi = int(np.ceil(scout_frame['minutes_played'].max()))
+        scout_min_minutes = st.sidebar.slider('Minimum minutes played', mins_lo, mins_hi,
+                                              mins_lo, step=10)
+        all_comps = sorted({c for lst in scout_frame['_comps'] for c in lst})
+        scout_comps = st.sidebar.multiselect('Competitions', all_comps, default=[],
+                                             placeholder='All competitions')
 
-    max_vaep_next_5s = the highest vaep_value among the same team's later actions
-    within 5 seconds of each throw-in, in the same game and period. Computed per
-    (game, period, team) group with a sorted searchsorted window instead of a
-    per-row full-frame scan — same result, a fraction of the time and memory.
-    """
-    competitions = list(competitions_tuple)
-    dfa_atomic = df_atomic[df_atomic['competition_id'].isin(competitions)].copy()
+        scout_pool = scout_frame[scout_frame['minutes_played'] >= scout_min_minutes]
+        if scout_comps:
+            wanted = set(scout_comps)
+            scout_pool = scout_pool[scout_pool['_comps'].map(lambda lst: bool(wanted & set(lst)))]
 
-    n = len(dfa_atomic)
-    max_next = np.zeros(n, dtype=float)
-    # map original index label -> row position, so we can write results back in order
-    positions = {ix: i for i, ix in enumerate(dfa_atomic.index)}
-
-    for _, g in dfa_atomic.groupby(['game_id', 'period_id', 'team_id'], sort=False):
-        g = g.sort_values('time_seconds')
-        t = g['time_seconds'].to_numpy()
-        v = g['vaep_value'].to_numpy()
-        idxs = g.index.to_numpy()
-        is_ti = g['type_name'].isin(['throw_in']).to_numpy()
-
-        for j in np.where(is_ti)[0]:
-            ct = t[j]
-            lo = np.searchsorted(t, ct, side='right')        # first action strictly after ct
-            hi = np.searchsorted(t, ct + 5, side='right')     # first action after ct + 5s
-            if hi > lo:
-                max_next[positions[idxs[j]]] = v[lo:hi].max()
-
-    dfa_atomic['max_vaep_next_5s'] = max_next
-    dfa_atomic['vaep_difference'] = dfa_atomic['max_vaep_next_5s'] - dfa_atomic['vaep_value']
-
-    dfx = dfa_atomic[(dfa_atomic['type_name'].isin(['throw_in'])) & (dfa_atomic['is_inbox'] == True)]
-    df2a = dfx[dfx['next_team_name'] == dfx['team_name']]
-    df2 = df2a[df2a['next_type_name'].isin(['receival', 'pass', 'goal', 'shot'])]
-
-    games_played = dfa_atomic.groupby(['team_name'])['game_id'].nunique().reset_index(name='games_played')
-    first_contacta = dfx.groupby('team_name').size().reset_index(name='set_pieces')
-    first_contactb = df2.groupby('team_name').size().reset_index(name='first_contact_won')
-    first_contact0 = first_contacta.merge(first_contactb, on='team_name', how='left').fillna(0)
-    first_contact = first_contact0.merge(games_played, on='team_name', how='left').fillna(0)
-    first_contact['first_contact_ratio'] = first_contact['first_contact_won'] / first_contact['set_pieces']
-    first_contact['set_pieces_per_game'] = first_contact['set_pieces'] / first_contact['games_played']
-
-    return first_contact, dfa_atomic
-
-first_contact_data, dfa_atomic = process_first_contact_data(tuple(selected_competitions), df_atomic)
-
-# Remaining sidebar controls (options depend on filtered data)
-numeric_columns = [col for col in team_table.columns
-                   if col not in ['team_name', 'games_played', 'fotmob_id']
-                   and team_table[col].dtype in ['float64', 'int64']]
-
-side_label('Scatter axes')
-x_axis = st.sidebar.selectbox(
-    'X-Axis:',
-    options=numeric_columns,
-    index=numeric_columns.index('xG_per_throw_in') if 'xG_per_throw_in' in numeric_columns else 0,
-)
-y_axis = st.sidebar.selectbox(
-    'Y-Axis:',
-    options=numeric_columns,
-    index=numeric_columns.index('throw_ins_per_game') if 'throw_ins_per_game' in numeric_columns else 1,
-)
-
-side_label('Value creation analysis')
-throw_in_filter = st.sidebar.radio(
-    'Select analysis type:',
-    options=[
-        'All final third throw-ins (VAEP)',
-        'Final third throw-ins excluding box (VAEP)',
-        'Possession duration after final third throw-ins',
-    ],
-    index=0,
-    label_visibility='collapsed',
-)
-
-side_label('Team maps')
-available_teams = sorted(team_table['team_name'].unique().tolist())
-selected_team = st.sidebar.selectbox('Select Team:', options=available_teams, index=0,
-                                     label_visibility='collapsed') if available_teams else None
+        # Search filters — these only narrow the player picker, not the pool
+        side_label('Search — narrows the picker only')
+        scout_name = st.sidebar.text_input('Name contains', '')
+        seasons = sorted({s for lst in scout_pool['_seasons'] for s in lst})
+        scout_season = st.sidebar.selectbox('Season', ['All'] + seasons)
+        scout_team = st.sidebar.selectbox('Team', ['All'] + sorted(scout_pool['_team'].unique()))
+        scout_roles = st.sidebar.multiselect('Roles', sorted(scout_pool['_role'].unique()),
+                                             default=[], placeholder='All roles')
 
 st.sidebar.markdown(
-    f'<p style="font-family:\'IBM Plex Mono\',monospace; font-size:10px; color:{ON_DARK_MUTED}; '
-    'margin-top:28px; line-height:1.7;">'
-    '<a href="https://gibranium.github.io" style="color:#9C948D;">Portfolio ↗</a><br>'
-    '<a href="https://the-cutback.beehiiv.com" style="color:#9C948D;">The Cutback ↗</a></p>',
+    '<a class="side-cta" href="https://davidegualano.com/work-with-me.html" target="_blank">'
+    'Work with me<span>Analysis · consulting · recruitment</span></a>'
+    '<p class="side-contact">'
+    '<a href="mailto:davide@davidegualano.com">davide@davidegualano.com</a><br>'
+    '<a href="https://davidegualano.com" target="_blank">davidegualano.com ↗</a><br>'
+    '<a href="https://www.linkedin.com/in/davide-gualano-a2454b187" target="_blank">LinkedIn ↗</a> · '
+    '<a href="https://x.com/gualanodavide" target="_blank">X ↗</a><br>'
+    '<a href="https://bsky.app/profile/gualanodavide.bsky.social" target="_blank">Bluesky ↗</a> · '
+    '<a href="https://the-cutback.beehiiv.com" target="_blank">The Cutback ↗</a>'
+    '</p>',
     unsafe_allow_html=True,
 )
 
 # ──────────────────────────────────────────────
 # Main column — header + stat band
 # ──────────────────────────────────────────────
-competitions_display = ', '.join(selected_competitions)
-formatted_season_display = (set_pieces['formatted_season'].iloc[0]
-                            if 'formatted_season' in set_pieces.columns and len(set_pieces) > 0 else '')
-season_text = f' {formatted_season_display}' if formatted_season_display else ''
+if mode == MODE_THROWINS:
+    competitions_display = ', '.join(selected_competitions)
+    formatted_season_display = (set_pieces['formatted_season'].iloc[0]
+                                if 'formatted_season' in set_pieces.columns and len(set_pieces) > 0 else '')
+    season_text = f' {formatted_season_display}' if formatted_season_display else ''
 
-st.markdown('<p class="eyebrow">Set pieces — 2025/26</p>', unsafe_allow_html=True)
-st.markdown('# Throw-ins, measured. <em>Live.</em>', unsafe_allow_html=True)
-st.markdown(
-    f'<p class="section-sub">The research pipeline behind '
-    f'<a href="https://the-cutback.beehiiv.com" style="color:{ACCENT};">The Cutback</a>\'s '
-    f'set-piece coverage, made queryable. Showing <b>{competitions_display}</b>.</p>',
-    unsafe_allow_html=True,
-)
-
-st.markdown(
-    '<div class="stat-band">'
-    f'<div class="stat"><div class="stat-label">Teams</div><div class="stat-value">{len(team_table)}</div></div>'
-    f'<div class="stat"><div class="stat-label">Throw-ins analyzed</div><div class="stat-value">{team_table["total_throw_ins"].sum():,.0f}</div></div>'
-    f'<div class="stat"><div class="stat-label">Shots after throw-ins</div><div class="stat-value">{team_table["shots_after_throw_ins"].sum():,.0f}</div></div>'
-    '</div>',
-    unsafe_allow_html=True,
-)
-
-with st.expander(f'Full team table — {len(team_table)} teams'):
-    st.dataframe(
-        team_table.sort_values(by='xG_per_throw_in', ascending=False).reset_index(drop=True),
-        use_container_width=True,
+    st.markdown('<p class="eyebrow">Set pieces — 2025/26</p>', unsafe_allow_html=True)
+    st.markdown('# Throw-ins, measured. <em>Live.</em>', unsafe_allow_html=True)
+    st.markdown(
+        f'<p class="section-sub">The research pipeline behind '
+        f'<a href="https://the-cutback.beehiiv.com" style="color:{ACCENT};">The Cutback</a>\'s '
+        f'set-piece coverage, made queryable. Showing <b>{competitions_display}</b>.</p>',
+        unsafe_allow_html=True,
     )
+    st.markdown(
+        '<div class="stat-band">'
+        f'<div class="stat"><div class="stat-label">Teams</div><div class="stat-value">{len(team_table)}</div></div>'
+        f'<div class="stat"><div class="stat-label">Throw-ins analyzed</div><div class="stat-value">{team_table["total_throw_ins"].sum():,.0f}</div></div>'
+        f'<div class="stat"><div class="stat-label">Shots after throw-ins</div><div class="stat-value">{team_table["shots_after_throw_ins"].sum():,.0f}</div></div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    with st.expander(f'Full team table — {len(team_table)} teams'):
+        st.dataframe(
+            team_table.sort_values(by='xG_per_throw_in', ascending=False).reset_index(drop=True),
+            use_container_width=True,
+        )
 
-# ──────────────────────────────────────────────
-# 01 — Explore: scatter with selectable metrics
-# ──────────────────────────────────────────────
-x_label = x_axis.replace('_', ' ').title()
-y_label_scatter = y_axis.replace('_', ' ').title()
-
-section('01', 'Explore', f'{y_label_scatter} vs {x_label}',
-        'Pick the metrics from the sidebar. Color follows the x-axis value.')
-
-fig = plt.figure(figsize=(12, 8), dpi=100, facecolor=BG)
-ax = plt.subplot(111, facecolor=BG)
-
-ax.spines['top'].set(visible=False)
-ax.spines['right'].set(visible=False)
-ax.spines['bottom'].set_color(GRID)
-ax.spines['left'].set_color(GRID)
-
-ax.grid(lw=0.1, color=GRID, axis='x', ls='-')
-ax.grid(lw=0.1, color=GRID, axis='y', ls='-')
-
-# afmhot_r gradient mapped onto the x-axis metric
-x_vals = team_table[x_axis]
-if x_vals.max() > x_vals.min():
-    fracs = (x_vals - x_vals.min()) / (x_vals.max() - x_vals.min())
 else:
-    fracs = pd.Series(0.5, index=x_vals.index)
-point_colors = [afm_at(f) for f in fracs]
+    st.markdown('<p class="eyebrow">Player evaluation — 2025/26</p>', unsafe_allow_html=True)
+    st.markdown('# Scouting, by percentile. <em>Live.</em>', unsafe_allow_html=True)
+    st.markdown(
+        f'<p class="section-sub">Every player scored against a pool you choose, using the '
+        f'metrics behind <a href="https://the-cutback.beehiiv.com" style="color:{ACCENT};">'
+        f'The Cutback</a>\'s evaluation notebooks. Set the pool in the sidebar.</p>',
+        unsafe_allow_html=True,
+    )
+    if groups and len(scout_pool):
+        st.markdown(
+            '<div class="stat-band">'
+            f'<div class="stat"><div class="stat-label">Position group</div>'
+            f'<div class="stat-value">{scout_group}</div></div>'
+            f'<div class="stat"><div class="stat-label">Stints in pool</div>'
+            f'<div class="stat-value">{len(scout_pool):,}</div></div>'
+            f'<div class="stat"><div class="stat-label">Metrics scored</div>'
+            f'<div class="stat-value">{pdash.metric_count(scout_group)}</div></div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
-ax.scatter(team_table[x_axis], team_table[y_axis], zorder=3, s=90,
-           c=point_colors, ec=INK, alpha=0.9, lw=0.6)
+if mode == MODE_THROWINS:
+    # ──────────────────────────────────────────────
+    # 01 — Explore: scatter with selectable metrics
+    # ──────────────────────────────────────────────
+    x_label = x_axis.replace('_', ' ').title()
+    y_label_scatter = y_axis.replace('_', ' ').title()
 
-x_threshold = team_table[x_axis].quantile(0.75)
-y_threshold = team_table[y_axis].quantile(0.75)
-outliers = team_table[(team_table[x_axis] >= x_threshold) |
-                      (team_table[y_axis] >= y_threshold)]
+    section('01', 'Explore', f'{y_label_scatter} vs {x_label}',
+            'Pick the metrics from the sidebar. Color follows the x-axis value.')
 
-for idx, row in outliers.iterrows():
-    ax.annotate(row['team_name'],
-                xy=(row[x_axis], row[y_axis]),
-                xytext=(5, 5), textcoords='offset points',
-                fontsize=9, color=INK,
-                bbox=dict(boxstyle='round,pad=0.3', fc=ON_DARK, ec=GRID, alpha=0.8, lw=0.5))
+    fig = plt.figure(figsize=(12, 8), dpi=100, facecolor=BG)
+    ax = plt.subplot(111, facecolor=BG)
 
-ax.set_xlabel(x_label, fontsize=12, color=MUTED, fontfamily=fe_regular.name)
-ax.set_ylabel(y_label_scatter, fontsize=12, color=MUTED, fontfamily=fe_regular.name)
-ax.set_title(f'{y_label_scatter} vs {x_label} | {competitions_display}{season_text}',
-             fontsize=13, color=INK, pad=15, fontfamily=fe_display.name, weight='bold', loc='left')
-ax.tick_params(axis='both', labelsize=10, color=GRID, labelcolor=MUTED)
+    ax.spines['top'].set(visible=False)
+    ax.spines['right'].set(visible=False)
+    ax.spines['bottom'].set_color(GRID)
+    ax.spines['left'].set_color(GRID)
 
-plt.tight_layout()
-st.pyplot(fig)
+    ax.grid(lw=0.1, color=GRID, axis='x', ls='-')
+    ax.grid(lw=0.1, color=GRID, axis='y', ls='-')
 
-# ──────────────────────────────────────────────
-# 02 — First contact won on throw-ins into box
-# ──────────────────────────────────────────────
-section('02', 'First contact', 'Who wins the box?',
-        'Ratio of first contacts won on throw-ins into the box. '
-        'Top 20 teams by volume of throw-ins into the box per game — '
-        'the circled number on the right.')
-
-if len(first_contact_data) == 0:
-    st.warning('No throw-in data available for first contact analysis.')
-else:
-    first_contact_by_volume = first_contact_data.sort_values(by='set_pieces_per_game', ascending=False).head(20)
-    plot_data_fc = first_contact_by_volume.sort_values(by='first_contact_ratio', ascending=False)
-
-    fig_fc, ax_fc = plt.subplots(figsize=(12, 10))
-    fig_fc.patch.set_facecolor(BG)
-    ax_fc.set_facecolor(BG)
-
-    n_fc = len(plot_data_fc)
-    bar_colors = afm_ramp(n_fc, hi_first=True)  # best (top) = darkest
-
-    y_pos = np.arange(n_fc)
-    ax_fc.barh(y_pos, plot_data_fc['first_contact_ratio'], color=bar_colors,
-               edgecolor=INK, linewidth=0.8, zorder=2)
-
-    ax_fc.set_yticks(y_pos)
-    ax_fc.set_yticklabels(plot_data_fc['team_name'], fontsize=11, fontfamily=fe_regular.name)
-    ax_fc.invert_yaxis()
-    ax_fc.grid(lw=1, color=GRID, axis='x', ls='--')
-
-    ax_fc.set_xlim(0, plot_data_fc['first_contact_ratio'].max() * 1.15)
-    ax_fc.set_xlabel('')
-
-    ax_fc.spines['top'].set_visible(False)
-    ax_fc.spines['right'].set_visible(False)
-    ax_fc.spines['left'].set_visible(False)
-
-    circle_x = plot_data_fc['first_contact_ratio'].max() * 1.1
-    for i, (idx, row) in enumerate(plot_data_fc.iterrows()):
-        ax_fc.text(circle_x, i, f"{row['set_pieces_per_game']:.1f}",
-                   ha='center', va='center', fontsize=11, fontweight='bold',
-                   fontfamily=fe_regular.name, color=INK,
-                   bbox=dict(boxstyle='circle,pad=0.3', facecolor=BG,
-                             edgecolor=INK, linewidth=1.5))
-
-    ax_fc.text(0.956, 1.015, 'Throw-ins into the box\nper game', ha='center', va='bottom',
-               fontsize=9, color=MUTED, fontfamily=fe_regular.name, transform=ax_fc.transAxes)
-
-    fig_titles(fig_fc, ax_fc,
-               'Ratio of first contacts won on throw ins into box',
-               f'Top 20 teams for volume of throw ins into box per game | {competitions_display}{season_text}')
-
-    plt.tight_layout(rect=[0, 0, 1, 0.94])
-    st.pyplot(fig_fc)
-
-# ──────────────────────────────────────────────
-# 03 — Value creation in the final third
-# ──────────────────────────────────────────────
-section('03', 'Value creation', 'Throw-in value creation in the final third',
-        'Distribution showing danger creation or possession duration after throw-ins. '
-        'Switch the analysis type from the sidebar.')
-
-if throw_in_filter == 'Possession duration after final third throw-ins':
-    df1 = set_pieces[set_pieces['start_x_a0'] >= 75]
-
-    if 'possession_chain_duration' not in df1.columns:
-        st.error("'possession_chain_duration' column not found in the dataset.")
-        df1 = pd.DataFrame()
+    # afmhot_r gradient mapped onto the x-axis metric
+    x_vals = team_table[x_axis]
+    if x_vals.max() > x_vals.min():
+        fracs = (x_vals - x_vals.min()) / (x_vals.max() - x_vals.min())
     else:
-        title_text = 'How long do teams keep possession after a final third throw in?'
-        subtitle_text = 'Distribution of length of possession in seconds after throw in.'
-        y_label = 'Possession Duration (seconds)'
-        metric_column = 'possession_chain_duration'
-else:
-    df1a = dfa_atomic[dfa_atomic['type_name'] == 'throw_in']
-    df1b = df1a[df1a['x_a0'] >= 75].dropna()
+        fracs = pd.Series(0.5, index=x_vals.index)
+    point_colors = [afm_at(f) for f in fracs]
 
-    if throw_in_filter == 'All final third throw-ins (VAEP)':
-        df1 = df1b
-        title_text = 'How much danger do teams create in the 5 seconds after a throw in in the final third?'
+    ax.scatter(team_table[x_axis], team_table[y_axis], zorder=3, s=90,
+               c=point_colors, ec=INK, alpha=0.9, lw=0.6)
+
+    x_threshold = team_table[x_axis].quantile(0.75)
+    y_threshold = team_table[y_axis].quantile(0.75)
+    outliers = team_table[(team_table[x_axis] >= x_threshold) |
+                          (team_table[y_axis] >= y_threshold)]
+
+    for idx, row in outliers.iterrows():
+        ax.annotate(row['team_name'],
+                    xy=(row[x_axis], row[y_axis]),
+                    xytext=(5, 5), textcoords='offset points',
+                    fontsize=9, color=INK,
+                    bbox=dict(boxstyle='round,pad=0.3', fc=ON_DARK, ec=GRID, alpha=0.8, lw=0.5))
+
+    ax.set_xlabel(x_label, fontsize=12, color=MUTED, fontfamily=fe_regular.name)
+    ax.set_ylabel(y_label_scatter, fontsize=12, color=MUTED, fontfamily=fe_regular.name)
+    ax.set_title(f'{y_label_scatter} vs {x_label} | {competitions_display}{season_text}',
+                 fontsize=13, color=INK, pad=15, fontfamily=fe_display.name, weight='bold', loc='left')
+    ax.tick_params(axis='both', labelsize=10, color=GRID, labelcolor=MUTED)
+
+    plt.tight_layout()
+    st.pyplot(fig)
+
+    # ──────────────────────────────────────────────
+    # 02 — First contact won on throw-ins into box
+    # ──────────────────────────────────────────────
+    section('02', 'First contact', 'Who wins the box?',
+            'Ratio of first contacts won on throw-ins into the box. '
+            'Top 20 teams by volume of throw-ins into the box per game — '
+            'the circled number on the right.')
+
+    if len(first_contact_data) == 0:
+        st.warning('No throw-in data available for first contact analysis.')
     else:
-        df1 = df1b[df1b['is_inbox'] != True]
-        title_text = 'How much danger do teams create after a final third throw in (excluding those into the box)?'
+        first_contact_by_volume = first_contact_data.sort_values(by='set_pieces_per_game', ascending=False).head(20)
+        plot_data_fc = first_contact_by_volume.sort_values(by='first_contact_ratio', ascending=False)
 
-    subtitle_text = ('Distribution of difference in Atomic VAEP value between throw in and the highest value '
-                     'in the following actions in a 5 seconds window.')
-    y_label = 'VAEP Difference'
-    metric_column = 'vaep_difference'
+        fig_fc, ax_fc = plt.subplots(figsize=(12, 10))
+        fig_fc.patch.set_facecolor(BG)
+        ax_fc.set_facecolor(BG)
 
-if len(df1) == 0:
-    st.warning('No throw-in data available for the selected analysis.')
-else:
-    team_medians = df1.groupby('team_name')[metric_column].median().sort_values(ascending=False)
-    teams = team_medians.nlargest(20).index.tolist()
+        n_fc = len(plot_data_fc)
+        bar_colors = afm_ramp(n_fc, hi_first=True)  # best (top) = darkest
 
-    data_to_plot = []
-    labels = []
-    counts = []
+        y_pos = np.arange(n_fc)
+        ax_fc.barh(y_pos, plot_data_fc['first_contact_ratio'], color=bar_colors,
+                   edgecolor=INK, linewidth=0.8, zorder=2)
 
-    for team in teams:
-        team_data = df1[df1['team_name'] == team][metric_column].dropna()
-        if len(team_data) > 0:
-            data_to_plot.append(team_data.values)
-            labels.append(team)
-            counts.append(len(team_data))
+        ax_fc.set_yticks(y_pos)
+        ax_fc.set_yticklabels(plot_data_fc['team_name'], fontsize=11, fontfamily=fe_regular.name)
+        ax_fc.invert_yaxis()
+        ax_fc.grid(lw=1, color=GRID, axis='x', ls='--')
 
-    if len(data_to_plot) == 0:
-        st.warning('No valid data to display.')
+        ax_fc.set_xlim(0, plot_data_fc['first_contact_ratio'].max() * 1.15)
+        ax_fc.set_xlabel('')
+
+        ax_fc.spines['top'].set_visible(False)
+        ax_fc.spines['right'].set_visible(False)
+        ax_fc.spines['left'].set_visible(False)
+
+        circle_x = plot_data_fc['first_contact_ratio'].max() * 1.1
+        for i, (idx, row) in enumerate(plot_data_fc.iterrows()):
+            ax_fc.text(circle_x, i, f"{row['set_pieces_per_game']:.1f}",
+                       ha='center', va='center', fontsize=11, fontweight='bold',
+                       fontfamily=fe_regular.name, color=INK,
+                       bbox=dict(boxstyle='circle,pad=0.3', facecolor=BG,
+                                 edgecolor=INK, linewidth=1.5))
+
+        ax_fc.text(0.956, 1.015, 'Throw-ins into the box\nper game', ha='center', va='bottom',
+                   fontsize=9, color=MUTED, fontfamily=fe_regular.name, transform=ax_fc.transAxes)
+
+        fig_titles(fig_fc, ax_fc,
+                   'Ratio of first contacts won on throw ins into box',
+                   f'Top 20 teams for volume of throw ins into box per game | {competitions_display}{season_text}')
+
+        plt.tight_layout(rect=[0, 0, 1, 0.94])
+        st.pyplot(fig_fc)
+
+    # ──────────────────────────────────────────────
+    # 03 — Value creation in the final third
+    # ──────────────────────────────────────────────
+    section('03', 'Value creation', 'Throw-in value creation in the final third',
+            'Distribution showing danger creation or possession duration after throw-ins. '
+            'Switch the analysis type from the sidebar.')
+
+    if throw_in_filter == 'Possession duration after final third throw-ins':
+        df1 = set_pieces[set_pieces['start_x_a0'] >= 75]
+
+        if 'possession_chain_duration' not in df1.columns:
+            st.error("'possession_chain_duration' column not found in the dataset.")
+            df1 = pd.DataFrame()
+        else:
+            title_text = 'How long do teams keep possession after a final third throw in?'
+            subtitle_text = 'Distribution of length of possession in seconds after throw in.'
+            y_label = 'Possession Duration (seconds)'
+            metric_column = 'possession_chain_duration'
     else:
-        fig_vaep, ax_vaep = plt.subplots(figsize=(16, 8))
-        fig_vaep.patch.set_facecolor(BG)
-        ax_vaep.set_facecolor(BG)
+        df1a = dfa_atomic[dfa_atomic['type_name'] == 'throw_in']
+        df1b = df1a[df1a['x_a0'] >= 75].dropna()
 
-        bp = ax_vaep.boxplot(data_to_plot,
-                             positions=range(len(data_to_plot)),
-                             widths=0.6,
-                             patch_artist=True,
-                             showfliers=False,
-                             showcaps=False,
-                             whiskerprops=dict(visible=False),
-                             manage_ticks=True)
+        if throw_in_filter == 'All final third throw-ins (VAEP)':
+            df1 = df1b
+            title_text = 'How much danger do teams create in the 5 seconds after a throw in in the final third?'
+        else:
+            df1 = df1b[df1b['is_inbox'] != True]
+            title_text = 'How much danger do teams create after a final third throw in (excluding those into the box)?'
 
-        # afmhot_r gradient: best median (left) = darkest, fading right
+        subtitle_text = ('Distribution of difference in Atomic VAEP value between throw in and the highest value '
+                         'in the following actions in a 5 seconds window.')
+        y_label = 'VAEP Difference'
+        metric_column = 'vaep_difference'
+
+    if len(df1) == 0:
+        st.warning('No throw-in data available for the selected analysis.')
+    else:
+        team_medians = df1.groupby('team_name')[metric_column].median().sort_values(ascending=False)
+        teams = team_medians.nlargest(20).index.tolist()
+
+        data_to_plot = []
+        labels = []
+        counts = []
+
+        for team in teams:
+            team_data = df1[df1['team_name'] == team][metric_column].dropna()
+            if len(team_data) > 0:
+                data_to_plot.append(team_data.values)
+                labels.append(team)
+                counts.append(len(team_data))
+
+        if len(data_to_plot) == 0:
+            st.warning('No valid data to display.')
+        else:
+            fig_vaep, ax_vaep = plt.subplots(figsize=(16, 8))
+            fig_vaep.patch.set_facecolor(BG)
+            ax_vaep.set_facecolor(BG)
+
+            bp = ax_vaep.boxplot(data_to_plot,
+                                 positions=range(len(data_to_plot)),
+                                 widths=0.6,
+                                 patch_artist=True,
+                                 showfliers=False,
+                                 showcaps=False,
+                                 whiskerprops=dict(visible=False),
+                                 manage_ticks=True)
+
+            # afmhot_r gradient: best median (left) = darkest, fading right
+            box_colors = afm_ramp(len(bp['boxes']), hi_first=True)
+
+            for patch, color in zip(bp['boxes'], box_colors):
+                patch.set_facecolor(color)
+                patch.set_edgecolor(INK)
+                patch.set_linewidth(1.5)
+
+            for median, color in zip(bp['medians'], box_colors):
+                median.set_color(contrast_on(color))
+                median.set_linewidth(2)
+
+            all_q1 = [np.percentile(data, 25) for data in data_to_plot]
+            all_q3 = [np.percentile(data, 75) for data in data_to_plot]
+            y_min = min(all_q1)
+            y_max = max(all_q3)
+            y_range = y_max - y_min
+            padding = y_range * 0.15
+            ax_vaep.set_ylim(y_min - padding, y_max + padding)
+
+            ax_vaep.set_xticks(range(len(labels)))
+            ax_vaep.set_xticklabels([f'{label}\n({count})' for label, count in zip(labels, counts)],
+                                    rotation=45, ha='right', fontsize=10, fontfamily=fe_regular.name)
+            ax_vaep.set_ylabel(y_label, fontsize=12, fontweight='bold',
+                               color=MUTED, fontfamily=fe_regular.name)
+
+            fig_titles(fig_vaep, ax_vaep, title_text,
+                       f'{subtitle_text}\nUpper and lower limits of box represent upper and lower quartiles. | '
+                       f'Outliers removed from visualisation. {competitions_display}{season_text}')
+
+            ax_vaep.axhline(y=0, color=MUTED, linestyle='--', alpha=0.5, linewidth=1)
+            ax_vaep.grid(axis='y', alpha=0.3, color=GRID, linestyle='-', linewidth=0.5)
+            ax_vaep.set_axisbelow(True)
+
+            plt.tight_layout(rect=[0, 0, 1, 0.92])
+            st.pyplot(fig_vaep)
+
+    # ──────────────────────────────────────────────
+    # 04 — Team-specific throw-in maps
+    # ──────────────────────────────────────────────
+    section('04', 'Team maps', 'Final third throw-in patterns',
+            'Pick a team from the sidebar to map their final third throw-ins, split by pitch side. '
+            'Heatmap shows ending coordinates.')
+
+    if not available_teams:
+        st.warning('No teams available for the selected competition(s).')
+    elif selected_team:
+        setp0 = set_pieces[set_pieces['team_name'] == selected_team]
+        setp1 = setp0[setp0['type_name'].isin(['throw_in'])]
+        setp2 = setp1[setp1['start_x_a0'] >= 75]
+        setpa = setp2[setp2['start_y_a0'] >= 34]
+        setpb = setp2[setp2['start_y_a0'] < 34]
+
+        if len(setp2) == 0:
+            st.warning(f'{selected_team} has no throw-ins in the final third for the selected competition(s).')
+        else:
+            fig2 = plt.figure(figsize=(20, 12), constrained_layout=True, facecolor=BG)
+            gs = fig2.add_gridspec(3, 6, wspace=0.1, hspace=0.1)
+
+            ax1 = fig2.add_subplot(gs[:, :3])
+            ax2 = fig2.add_subplot(gs[0:3, 3:])
+
+            pitch1 = VerticalPitch(pitch_type='custom', pitch_width=68, pitch_length=105, half=True,
+                                   pad_top=0.4, goal_type='box', pad_bottom=0.4,
+                                   linewidth=1.25, line_color=INK, pitch_color=BG)
+            pitch2 = VerticalPitch(pitch_type='custom', pitch_width=68, pitch_length=105, half=True,
+                                   pad_top=0.4, goal_type='box', pad_bottom=0.4,
+                                   linewidth=1.25, line_color=INK, pitch_color=BG)
+
+            ax1.set_facecolor(BG)
+            ax2.set_facecolor(BG)
+
+            pitch1.draw(ax=ax1)
+            pitch2.draw(ax=ax2)
+
+            ax1.axhline(y=75, color=INK, linestyle='--', linewidth=2, alpha=0.7, zorder=2)
+            ax2.axhline(y=75, color=INK, linestyle='--', linewidth=2, alpha=0.7, zorder=2)
+
+            bins = (18, 12)
+
+            if len(setpa) > 0:
+                bs_heatmap = pitch1.bin_statistic(setpa.end_x_a0, setpa.end_y_a0, statistic='count', bins=bins)
+                pitch1.heatmap(bs_heatmap, ax=ax1, cmap=HEAT_CMAP, zorder=0, alpha=0.7)
+                pitch1.arrows(setpa.start_x_a0, setpa.start_y_a0, setpa.end_x_a0, setpa.end_y_a0,
+                              width=1.5, zorder=1, alpha=0.5,
+                              ec=ON_DARK, fc=INK, headwidth=10, headlength=8, ax=ax1)
+                pitch1.scatter(setpa.start_x_a0, setpa.start_y_a0, c=INK, marker='o', s=100, ax=ax1, zorder=1)
+
+            if len(setpb) > 0:
+                bs_heatmapy = pitch2.bin_statistic(setpb.end_x_a0, setpb.end_y_a0, statistic='count', bins=bins)
+                pitch2.heatmap(bs_heatmapy, ax=ax2, cmap=HEAT_CMAP, zorder=0, alpha=0.7)
+                pitch2.arrows(setpb.start_x_a0, setpb.start_y_a0, setpb.end_x_a0, setpb.end_y_a0,
+                              width=1.5, zorder=1, alpha=0.5,
+                              ec=ON_DARK, fc=INK, headwidth=10, headlength=8, ax=ax2)
+                pitch2.scatter(setpb.start_x_a0, setpb.start_y_a0, c=INK, marker='o', s=100, ax=ax2, zorder=1)
+
+            competition_ids = ', '.join(setp1['competition_id'].unique())
+            formatted_season = (setp1['formatted_season'].iloc[0]
+                                if 'formatted_season' in setp1.columns and len(setp1) > 0 else '')
+            season_display = f' {formatted_season}' if formatted_season else ''
+
+            ax1.text(0.5, 1.05, f'Number of throw ins: {setpa.shape[0]}',
+                     color=INK, va='center', ha='center', fontsize=11, transform=ax1.transAxes,
+                     fontfamily=fe_regular.name)
+            ax2.text(0.5, 1.05, f'Number of throw ins: {setpb.shape[0]}',
+                     color=INK, va='center', ha='center', fontsize=11, transform=ax2.transAxes,
+                     fontfamily=fe_regular.name)
+
+            fig2.text(0.07, 0.905, f'{selected_team} final third throw ins map',
+                      fontsize=30, va='center', ha='left', color=INK, fontfamily=fe_display.name)
+            fig2.text(0.07, 0.87, f'Heatmap: Ending Coordinates | {competition_ids}{season_display}',
+                      fontsize=20, va='center', ha='left', color=MUTED, fontfamily=fe_regular.name)
+            fig2.text(0, 0.15, 'X: @gualanodavide | Bluesky: @gualanodavide.bsky.social | '
+                      'Linkedin: www.linkedin.com/in/davide-gualano-a2454b187 | Newsletter: the-cutback.beehiiv.com',
+                      va='center', ha='left', fontsize=12, color=MUTED, fontfamily=fe_regular.name)
+
+            st.pyplot(fig2)
+
+# ──────────────────────────────────────────────
+# Players — filterable player visualisations
+# ──────────────────────────────────────────────
+if mode == MODE_THROWINS:
+    section('05', 'Players', 'Who throws it, and how far',
+            'Pick the teams and the minimum volume below, then rank the players on any '
+            'metric. The leaderboard and the length distribution both follow these filters.')
+
+    # Filters sit under the section title (the sidebar is busy with team controls)
+    throws = set_pieces[set_pieces['type_name'] == 'throw_in'].copy()
+
+    # Optional richer player table from the evaluation notebooks: drop
+    # PLAYER_TABLE_CSV next to app.py and any numeric column it carries shows
+    # up in the "Rank players by" picker with no code change.
+    extra_players = load_player_table()
+    if extra_players is not None and 'competition_id' in extra_players.columns:
+        extra_players = extra_players[extra_players['competition_id'].isin(selected_competitions)]
+
+    f1, f2 = st.columns([3, 1])
+    with f1:
+        picked_teams = st.multiselect(
+            'Teams', sorted(throws['team_name'].dropna().unique()),
+            default=[], placeholder='All teams',
+        )
+    with f2:
+        min_throws = st.number_input('Min. throw-ins', min_value=1, value=10, step=1)
+
+    if picked_teams:
+        throws = throws[throws['team_name'].isin(picked_teams)]
+
+    if len(throws) == 0:
+        summary = pd.DataFrame(columns=['player_name'])
+    else:
+        summary = throws.groupby('player_name').agg(
+            throw_ins=('length', 'size'),
+            team=('team_name', lambda s: s.mode().iat[0] if len(s.mode()) else ''),
+            avg_length=('length', 'mean'),
+            median_length=('length', 'median'),
+            upper_quartile_length=('length', lambda s: s.quantile(0.75)),
+            max_length=('length', 'max'),
+            final_third_share=('start_x_a0', lambda s: (s >= 75).mean()),
+        ).reset_index()
+        summary = summary[summary['throw_ins'] >= min_throws]
+
+        if extra_players is not None and 'player_name' in extra_players.columns:
+            dupes = [c for c in extra_players.columns if c in summary.columns and c != 'player_name']
+            summary = summary.merge(extra_players.drop(columns=dupes), on='player_name', how='left')
+
+    if len(summary) == 0:
+        st.warning('No player matches these filters. Try adding teams or lowering the '
+                   'minimum throw-ins.')
+    else:
+        metric_cols = [c for c in summary.columns
+                       if c != 'player_name' and pd.api.types.is_numeric_dtype(summary[c])]
+
+        m1, m2 = st.columns([2, 1])
+        with m1:
+            metric = st.selectbox(
+                'Rank players by', metric_cols,
+                index=metric_cols.index('upper_quartile_length') if 'upper_quartile_length' in metric_cols else 0,
+                format_func=lambda c: c.replace('_', ' ').title(),
+            )
+        with m2:
+            top_n = st.slider('Players shown', 5, 30, 15)
+
+        metric_label = metric.replace('_', ' ').title()
+        filter_note = (f'{len(summary)} players | min {min_throws} throw-ins | '
+                       f'{competitions_display}{season_text}')
+
+        with st.expander(f'Full player table — {len(summary)} players'):
+            st.dataframe(summary.sort_values(by=metric, ascending=False).reset_index(drop=True),
+                         use_container_width=True)
+
+        # ──────────────────────────────────────────────
+        # Leaderboard on the selected metric
+        # ──────────────────────────────────────────────
+        st.caption(f'Top {top_n} by {metric_label.lower()}. Circle on the right is the '
+                   f'number of throw-ins the player took under these filters.')
+
+        plot_data = summary.sort_values(by=metric, ascending=False).head(top_n)
+
+        fig_lb, ax_lb = plt.subplots(figsize=(12, max(6, 0.5 * len(plot_data))))
+        fig_lb.patch.set_facecolor(BG)
+        ax_lb.set_facecolor(BG)
+
+        y_pos = np.arange(len(plot_data))
+        bar_colors = afm_ramp(len(plot_data), hi_first=True)
+
+        # Length metrics get the player's maximum as an outlined backdrop bar
+        if metric.endswith('length') and metric != 'max_length':
+            ax_lb.barh(y_pos, plot_data['max_length'], color=[0, 0, 0, 0],
+                       edgecolor=INK, linewidth=0.8, zorder=2)
+        ax_lb.barh(y_pos, plot_data[metric], color=bar_colors,
+                   edgecolor=INK, linewidth=0.8, zorder=2)
+
+        ax_lb.set_yticks(y_pos)
+        ax_lb.set_yticklabels([f"{r.player_name}  ({r.team})" for r in plot_data.itertuples()],
+                              fontsize=11, fontfamily=fe_regular.name)
+        ax_lb.invert_yaxis()
+        ax_lb.grid(lw=1, color=GRID, axis='x', ls='--')
+        ax_lb.set_axisbelow(True)
+
+        bar_max = max(plot_data[metric].max(),
+                      plot_data['max_length'].max() if metric.endswith('length') and metric != 'max_length' else 0)
+        ax_lb.set_xlim(0, bar_max * 1.15)
+        ax_lb.set_xlabel('')
+
+        for side in ('top', 'right', 'left'):
+            ax_lb.spines[side].set_visible(False)
+
+        circle_x = bar_max * 1.1
+        for i, row in enumerate(plot_data.itertuples()):
+            ax_lb.text(circle_x, i, f'{row.throw_ins:.0f}',
+                       ha='center', va='center', fontsize=9, fontweight='bold',
+                       fontfamily=fe_regular.name, color=INK,
+                       bbox=dict(boxstyle='circle,pad=0.3', facecolor=BG,
+                                 edgecolor=INK, linewidth=1.5))
+
+        ax_lb.text(0.956, 1.015, 'Throw-ins', ha='center', va='bottom',
+                   fontsize=9, color=MUTED, fontfamily=fe_regular.name, transform=ax_lb.transAxes)
+
+        fig_titles(fig_lb, ax_lb, f'{metric_label} — top {len(plot_data)}', filter_note)
+        plt.tight_layout(rect=[0, 0, 1, 0.93])
+        st.pyplot(fig_lb)
+
+        ranked_players = plot_data['player_name'].tolist()
+
+        # ──────────────────────────────────────────────
+        # Length distributions
+        # ──────────────────────────────────────────────
+        section('06', 'Distribution', 'Spread of throwing length',
+                'Boxes are the interquartile range for each of the ranked players, '
+                'ordered by median length. Outliers hidden.')
+
+        dist = [throws[throws['player_name'] == p]['length'].dropna().values for p in ranked_players]
+        order = np.argsort([np.median(d) for d in dist])[::-1]
+        dist = [dist[i] for i in order]
+        dist_labels = [ranked_players[i] for i in order]
+
+        fig_d, ax_d = plt.subplots(figsize=(16, 8))
+        fig_d.patch.set_facecolor(BG)
+        ax_d.set_facecolor(BG)
+
+        bp = ax_d.boxplot(dist, positions=range(len(dist)), widths=0.6, patch_artist=True,
+                          showfliers=False, showcaps=False, whiskerprops=dict(visible=False))
+
         box_colors = afm_ramp(len(bp['boxes']), hi_first=True)
-
         for patch, color in zip(bp['boxes'], box_colors):
             patch.set_facecolor(color)
             patch.set_edgecolor(INK)
             patch.set_linewidth(1.5)
-
         for median, color in zip(bp['medians'], box_colors):
             median.set_color(contrast_on(color))
             median.set_linewidth(2)
 
-        all_q1 = [np.percentile(data, 25) for data in data_to_plot]
-        all_q3 = [np.percentile(data, 75) for data in data_to_plot]
-        y_min = min(all_q1)
-        y_max = max(all_q3)
-        y_range = y_max - y_min
-        padding = y_range * 0.15
-        ax_vaep.set_ylim(y_min - padding, y_max + padding)
+        ax_d.set_xticks(range(len(dist_labels)))
+        ax_d.set_xticklabels([f'{p}\n({len(d)})' for p, d in zip(dist_labels, dist)],
+                             rotation=45, ha='right', fontsize=10, fontfamily=fe_regular.name)
+        ax_d.set_ylabel('Throw length (m)', fontsize=12, fontweight='bold',
+                        color=MUTED, fontfamily=fe_regular.name)
+        ax_d.grid(axis='y', alpha=0.3, color=GRID, linestyle='-', linewidth=0.5)
+        ax_d.set_axisbelow(True)
 
-        ax_vaep.set_xticks(range(len(labels)))
-        ax_vaep.set_xticklabels([f'{label}\n({count})' for label, count in zip(labels, counts)],
-                                rotation=45, ha='right', fontsize=10, fontfamily=fe_regular.name)
-        ax_vaep.set_ylabel(y_label, fontsize=12, fontweight='bold',
-                           color=MUTED, fontfamily=fe_regular.name)
-
-        fig_titles(fig_vaep, ax_vaep, title_text,
-                   f'{subtitle_text}\nUpper and lower limits of box represent upper and lower quartiles. | '
-                   f'Outliers removed from visualisation. {competitions_display}{season_text}')
-
-        ax_vaep.axhline(y=0, color=MUTED, linestyle='--', alpha=0.5, linewidth=1)
-        ax_vaep.grid(axis='y', alpha=0.3, color=GRID, linestyle='-', linewidth=0.5)
-        ax_vaep.set_axisbelow(True)
-
+        fig_titles(fig_d, ax_d, 'Throwing length distribution',
+                   f'Upper and lower limits of box represent upper and lower quartiles. | {filter_note}')
         plt.tight_layout(rect=[0, 0, 1, 0.92])
-        st.pyplot(fig_vaep)
+        st.pyplot(fig_d)
 
 # ──────────────────────────────────────────────
-# 04 — Team-specific throw-in maps
+# Player evaluation — percentile dashboards
 # ──────────────────────────────────────────────
-section('04', 'Team maps', 'Final third throw-in patterns',
-        'Pick a team from the sidebar to map their final third throw-ins, split by pitch side. '
-        'Heatmap shows ending coordinates.')
-
-if not available_teams:
-    st.warning('No teams available for the selected competition(s).')
-elif selected_team:
-    setp0 = set_pieces[set_pieces['team_name'] == selected_team]
-    setp1 = setp0[setp0['type_name'].isin(['throw_in'])]
-    setp2 = setp1[setp1['start_x_a0'] >= 75]
-    setpa = setp2[setp2['start_y_a0'] >= 34]
-    setpb = setp2[setp2['start_y_a0'] < 34]
-
-    if len(setp2) == 0:
-        st.warning(f'{selected_team} has no throw-ins in the final third for the selected competition(s).')
+if mode == MODE_SCOUT:
+    if not groups:
+        st.info('Drop the `dashboard_*.parquet` exports next to `app.py` to enable this section.')
+    elif len(scout_pool) == 0:
+        st.warning('No stints in the pool. Lower the minutes threshold or widen the competitions.')
     else:
-        fig2 = plt.figure(figsize=(20, 12), constrained_layout=True, facecolor=BG)
-        gs = fig2.add_gridspec(3, 6, wspace=0.1, hspace=0.1)
+        # ──────────────────────────────────────────────
+        # 01 — Query the pool on any number of percentile thresholds
+        # ──────────────────────────────────────────────
+        section('01', 'Scouting', 'Query the percentile table',
+                'Every stint in the pool, scored against the pool. Add as many metric '
+                'thresholds as you like — a player has to clear all of them to stay in.')
 
-        ax1 = fig2.add_subplot(gs[:, :3])
-        ax2 = fig2.add_subplot(gs[0:3, 3:])
+        pct_table = pdash.percentile_table(scout_frame, scout_pool, scout_group)
+        metric_cols = [c for c in pct_table.columns if c.endswith('__pctile')]
 
-        pitch1 = VerticalPitch(pitch_type='custom', pitch_width=68, pitch_length=105, half=True,
-                               pad_top=0.4, goal_type='box', pad_bottom=0.4,
-                               linewidth=1.25, line_color=INK, pitch_color=BG)
-        pitch2 = VerticalPitch(pitch_type='custom', pitch_width=68, pitch_length=105, half=True,
-                               pad_top=0.4, goal_type='box', pad_bottom=0.4,
-                               linewidth=1.25, line_color=INK, pitch_color=BG)
+        picked_metrics = st.multiselect(
+            'Filter on these metrics', metric_cols,
+            default=[], placeholder='No thresholds — showing the whole pool',
+            format_func=pdash.pretty_metric,
+        )
 
-        ax1.set_facecolor(BG)
-        ax2.set_facecolor(BG)
+        # One 0-100 range per metric, so "above 70" and "between 40 and 60" both work
+        bounds = {}
+        for i, metric in enumerate(picked_metrics):
+            if i % 3 == 0:
+                cols = st.columns(3)
+            with cols[i % 3]:
+                bounds[metric] = st.slider(pdash.pretty_metric(metric), 0, 100, (70, 100),
+                                           key=f'q_{scout_group}_{metric}')
 
-        pitch1.draw(ax=ax1)
-        pitch2.draw(ax=ax2)
+        matches = pct_table
+        for metric, (lo, hi) in bounds.items():
+            # NaN means the metric is undefined for that stint — treat as failing
+            matches = matches[matches[metric].between(lo, hi)]
 
-        ax1.axhline(y=75, color=INK, linestyle='--', linewidth=2, alpha=0.7, zorder=2)
-        ax2.axhline(y=75, color=INK, linestyle='--', linewidth=2, alpha=0.7, zorder=2)
+        if picked_metrics:
+            sort_by = st.selectbox('Sort by', picked_metrics, format_func=pdash.pretty_metric)
+            matches = matches.sort_values(by=sort_by, ascending=False)
+            front = ['player_name', 'team_name', 'season_id', 'role'] + picked_metrics
+            shown = matches[front + [c for c in matches.columns if c not in front]]
+        else:
+            shown = matches
 
-        bins = (18, 12)
+        st.caption(f'{len(matches)} of {len(pct_table)} stints in the pool clear '
+                   f'{len(bounds)} threshold(s).')
+        st.dataframe(shown.round(1).reset_index(drop=True), use_container_width=True, height=380)
+        st.download_button('Download these rows (CSV)', shown.to_csv(index=False).encode(),
+                           file_name=f'scouting_{scout_group}.csv', mime='text/csv')
 
-        if len(setpa) > 0:
-            bs_heatmap = pitch1.bin_statistic(setpa.end_x_a0, setpa.end_y_a0, statistic='count', bins=bins)
-            pitch1.heatmap(bs_heatmap, ax=ax1, cmap=HEAT_CMAP, zorder=0, alpha=0.7)
-            pitch1.arrows(setpa.start_x_a0, setpa.start_y_a0, setpa.end_x_a0, setpa.end_y_a0,
-                          width=1.5, zorder=1, alpha=0.5,
-                          ec=ON_DARK, fc=INK, headwidth=10, headlength=8, ax=ax1)
-            pitch1.scatter(setpa.start_x_a0, setpa.start_y_a0, c=INK, marker='o', s=100, ax=ax1, zorder=1)
+        # ──────────────────────────────────────────────
+        # 02 — Dashboard for one of the matches
+        # ──────────────────────────────────────────────
+        section('02', 'Dashboard', 'Percentile dashboard',
+                'Drawn for one stint against the same pool. The picker is limited to the '
+                'query results above, narrowed by the sidebar search.')
 
-        if len(setpb) > 0:
-            bs_heatmapy = pitch2.bin_statistic(setpb.end_x_a0, setpb.end_y_a0, statistic='count', bins=bins)
-            pitch2.heatmap(bs_heatmapy, ax=ax2, cmap=HEAT_CMAP, zorder=0, alpha=0.7)
-            pitch2.arrows(setpb.start_x_a0, setpb.start_y_a0, setpb.end_x_a0, setpb.end_y_a0,
-                          width=1.5, zorder=1, alpha=0.5,
-                          ec=ON_DARK, fc=INK, headwidth=10, headlength=8, ax=ax2)
-            pitch2.scatter(setpb.start_x_a0, setpb.start_y_a0, c=INK, marker='o', s=100, ax=ax2, zorder=1)
+        found = scout_pool.loc[scout_pool.index.intersection(matches.index)]
+        if scout_name.strip():
+            found = found[found['_name'].str.lower().str.contains(scout_name.strip().lower())]
+        if scout_season != 'All':
+            found = found[found['_seasons'].map(lambda lst: scout_season in lst)]
+        if scout_team != 'All':
+            found = found[found['_team'] == scout_team]
+        if scout_roles:
+            found = found[found['_role'].isin(scout_roles)]
 
-        competition_ids = ', '.join(setp1['competition_id'].unique())
-        formatted_season = (setp1['formatted_season'].iloc[0]
-                            if 'formatted_season' in setp1.columns and len(setp1) > 0 else '')
-        season_display = f' {formatted_season}' if formatted_season else ''
+        if len(found) == 0:
+            st.warning('No stint matches both the query and the sidebar search.')
+        else:
+            row_id = st.selectbox('Player', found.index.tolist(),
+                                  format_func=lambda i: scout_frame.at[i, '_label'])
 
-        ax1.text(0.5, 1.05, f'Number of throw ins: {setpa.shape[0]}',
-                 color=INK, va='center', ha='center', fontsize=11, transform=ax1.transAxes,
-                 fontfamily=fe_regular.name)
-        ax2.text(0.5, 1.05, f'Number of throw ins: {setpb.shape[0]}',
-                 color=INK, va='center', ha='center', fontsize=11, transform=ax2.transAxes,
-                 fontfamily=fe_regular.name)
+            fig_dash = pdash.plot_dashboard(scout_frame, scout_pool, row_id,
+                                            scout_group, DASH_STYLE)
+            st.pyplot(fig_dash)
 
-        fig2.text(0.07, 0.905, f'{selected_team} final third throw ins map',
-                  fontsize=30, va='center', ha='left', color=INK, fontfamily=fe_display.name)
-        fig2.text(0.07, 0.87, f'Heatmap: Ending Coordinates | {competition_ids}{season_display}',
-                  fontsize=20, va='center', ha='left', color=MUTED, fontfamily=fe_regular.name)
-        fig2.text(0, 0.15, 'X: @gualanodavide | Bluesky: @gualanodavide.bsky.social | '
-                  'Linkedin: www.linkedin.com/in/davide-gualano-a2454b187 | Newsletter: the-cutback.beehiiv.com',
-                  va='center', ha='left', fontsize=12, color=MUTED, fontfamily=fe_regular.name)
-
-        st.pyplot(fig2)
-
-# ──────────────────────────────────────────────
-# 05 — Player throw-in statistics
-# ──────────────────────────────────────────────
-section('05', 'Players', 'Quarterbacks wannabe',
-        'Top 15 players by upper quartile throwing length (minimum 10 throw-ins). '
-        'Outlined bar = maximum length, filled bar = upper quartile, circle = average.')
-
-player_data = set_pieces.copy()
-
-player_set_piecesa = player_data.groupby('player_name').size().reset_index(name='total_throw_ins')
-player_set_piecesb = player_data.groupby('player_name')['length'].quantile(0.75).reset_index(name='upper_quartile_throwing_length')
-player_set_piecesc = player_data.groupby('player_name')['length'].max().reset_index(name='maximum_throwing_length')
-player_set_piecesd = player_data.groupby('player_name')['length'].mean().reset_index(name='average_throwing_length')
-player_set_pieces0 = player_set_piecesa.merge(player_set_piecesb, on='player_name', how='left').fillna(0)
-player_set_pieces1 = player_set_pieces0.merge(player_set_piecesc, on='player_name', how='left').fillna(0)
-player_set_pieces = player_set_pieces1.merge(player_set_piecesd, on='player_name', how='left').fillna(0)
-
-player_set_pieces = player_set_pieces[player_set_pieces['total_throw_ins'] >= 10]
-
-if len(player_set_pieces) == 0:
-    st.warning('No players have 10 or more throw-ins in the selected competition(s).')
-else:
-    plot_data = player_set_pieces.sort_values(by='upper_quartile_throwing_length', ascending=False).head(15)
-
-    fig3, ax3 = plt.subplots(figsize=(12, 8))
-    fig3.patch.set_facecolor(BG)
-    ax3.set_facecolor(BG)
-
-    n_pl = len(plot_data)
-    bar_colors = afm_ramp(n_pl, hi_first=True)
-
-    y_pos = np.arange(n_pl)
-    ax3.barh(y_pos, plot_data['maximum_throwing_length'], color=[0, 0, 0, 0],
-             edgecolor=INK, linewidth=0.8, zorder=2)
-    ax3.barh(y_pos, plot_data['upper_quartile_throwing_length'],
-             color=bar_colors, edgecolor=INK, linewidth=0.8, zorder=2)
-
-    ax3.set_yticks(y_pos)
-    ax3.set_yticklabels(plot_data['player_name'], fontsize=11, fontfamily=fe_regular.name)
-    ax3.invert_yaxis()
-    ax3.grid(lw=1, color=GRID, axis='x', ls='--')
-
-    ax3.set_xlim(0, plot_data['maximum_throwing_length'].max() * 1.15)
-    ax3.set_xlabel('')
-
-    ax3.spines['top'].set_visible(False)
-    ax3.spines['right'].set_visible(False)
-    ax3.spines['left'].set_visible(False)
-
-    circle_x = plot_data['maximum_throwing_length'].max() * 1.1
-    for i, (idx, row) in enumerate(plot_data.iterrows()):
-        ax3.text(circle_x, i, f"{row['average_throwing_length']:.2f}",
-                 ha='center', va='center', fontsize=9, fontweight='bold',
-                 fontfamily=fe_regular.name, color=INK,
-                 bbox=dict(boxstyle='circle,pad=0.3', facecolor=BG,
-                           edgecolor=INK, linewidth=1.5))
-
-    ax3.text(0.956, 1.015, 'Avg. throwing length (m)', ha='center', va='bottom',
-             fontsize=9, color=MUTED, fontfamily=fe_regular.name, transform=ax3.transAxes)
-
-    fig_titles(fig3, ax3, 'Quarterbacks wannabe',
-               f'Top 15 players for upper quartile of throw in length | minimum 10 throw ins | '
-               f'{competitions_display}{season_text}')
-
-    plt.tight_layout(rect=[0, 0, 1, 0.93])
-    st.pyplot(fig3)
+            png = io.BytesIO()
+            fig_dash.savefig(png, format='png', dpi=200,
+                             facecolor=fig_dash.get_facecolor(), bbox_inches='tight')
+            safe_name = re.sub(r'[^A-Za-z0-9._-]+', '_', scout_frame.at[row_id, '_label']).strip('_')
+            st.download_button('Download dashboard (PNG)', png.getvalue(),
+                               file_name=f'{safe_name}.png', mime='image/png')
 
 # ──────────────────────────────────────────────
 # Footer
 # ──────────────────────────────────────────────
 st.markdown(
     '<div class="section-rule"></div>'
+    '<div class="hire-band">'
+    '<h3>Want this for your club?</h3>'
+    '<p>Everything on this page — the throw-in models, the possession-value metrics, the '
+    'percentile dashboards — comes from a pipeline I build and maintain end to end. '
+    'I take on analysis, consulting and recruitment work.</p>'
+    '<a class="cta" href="https://davidegualano.com/work-with-me.html" target="_blank">'
+    'Work with me →</a>'
+    '<p class="lines">Or reach me directly at '
+    '<a href="mailto:davide@davidegualano.com">davide@davidegualano.com</a>.</p>'
+    '</div>',
+    unsafe_allow_html=True,
+)
+
+st.markdown(
     '<p class="footer-mono">Davide Gualano — '
     '<a href="https://x.com/gualanodavide">X</a> · '
     '<a href="https://bsky.app/profile/gualanodavide.bsky.social">Bluesky</a> · '
     '<a href="https://www.linkedin.com/in/davide-gualano-a2454b187">LinkedIn</a> · '
     '<a href="https://the-cutback.beehiiv.com">The Cutback</a> · '
-    '<a href="https://gibranium.github.io">Portfolio</a></p>',
+    '<a href="https://davidegualano.com">Portfolio</a></p>',
     unsafe_allow_html=True,
 )

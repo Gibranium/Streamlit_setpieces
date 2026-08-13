@@ -1,8 +1,6 @@
 streamlit
 pandas
 numpy
-scipy
 matplotlib
-Pillow
 mplsoccer
-tqdm
+pyarrow
