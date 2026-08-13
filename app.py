@@ -378,12 +378,39 @@ def format_season_id(season_id):
 # ──────────────────────────────────────────────
 # Data
 # ──────────────────────────────────────────────
+def read_slim(path, wanted):
+    """Read only the columns we actually use, with floats at 32-bit.
+
+    These files are wide and the deployment has a hard memory ceiling; reading
+    every column and downcasting afterwards still peaks at the full width, so
+    the intersection is taken from the header first.
+    """
+    header = pd.read_csv(path, nrows=0)
+    usecols = [c for c in wanted if c in header.columns]
+    # No index_col: the exported row numbers are never read, and dropping them
+    # saves a column. Anything downstream only needs the index to be unique.
+    df = pd.read_csv(path, usecols=usecols) if usecols else pd.read_csv(path, index_col=0)
+    floats = df.select_dtypes('float64').columns
+    df[floats] = df[floats].astype('float32')
+    return df
+
+
+SET_PIECE_COLS = ['competition_id', 'fotmob_id', 'formatted_season', 'game_id',
+                  'team_name', 'player_name', 'type_name', 'length',
+                  'start_x_a0', 'start_y_a0', 'end_x_a0', 'end_y_a0',
+                  'possession_chain_duration']
+
+ATOMIC_COLS = ['competition_id', 'game_id', 'period_id', 'team_id', 'team_name',
+               'time_seconds', 'vaep_value', 'type_name', 'x_a0', 'is_inbox',
+               'next_team_name', 'next_type_name']
+
+
 @st.cache_data
 def load_data():
-    set_pieces = pd.read_csv('throwins2526.csv', index_col=0)
-    team_table = pd.read_csv('throwinstable2526.csv', index_col=0)
-    df_atomic = pd.read_csv('throwinsatomic2526.csv', index_col=0)
-    return set_pieces, team_table, df_atomic
+    """Throw-in tables. The atomic file is loaded separately, inside the cached
+    first-contact step, so it never sits in memory in scouting mode."""
+    return (read_slim('throwins2526.csv', SET_PIECE_COLS),
+            pd.read_csv('throwinstable2526.csv', index_col=0))
 
 # Optional player-level table exported from the evaluation notebooks.
 # If the file isn't there the Players tab just runs on set_pieces alone.
@@ -391,26 +418,29 @@ PLAYER_TABLE_CSV = 'throwinsplayers2526.csv'
 
 
 @st.cache_data
-def load_dashboards():
-    """One frame per position group, keyed by the suffix of dashboard_<GRP>.parquet.
+def available_groups():
+    """Position groups on disk. Globs filenames only — reads nothing."""
+    found = [os.path.basename(p)[len('dashboard_'):-len('.parquet')]
+             for p in sorted(glob.glob('dashboard_*.parquet'))]
+    return [g for g in found if g in pdash.DASHBOARDS]
 
-    The `_`-prefixed columns are precomputed here so the filters don't re-derive
-    them on every rerun; parquet returns the list columns as numpy arrays, which
-    is what pdash.as_list is built to take."""
-    out = {}
-    for path in sorted(glob.glob('dashboard_*.parquet')):
-        group = os.path.basename(path)[len('dashboard_'):-len('.parquet')]
-        if group not in pdash.DASHBOARDS:
-            continue
-        df = pd.read_parquet(path).reset_index(drop=True)
-        df['_name'] = df['player_name'].map(pdash.clean_str)
-        df['_team'] = df['team_name'].map(pdash.clean_str)
-        df['_role'] = df['position'].map(lambda v: pdash.clean_str(v, group))
-        df['_seasons'] = df['season_id'].map(pdash.as_list)
-        df['_comps'] = df['competition_id'].map(pdash.as_list)
-        df['_label'] = df.apply(pdash.stint_label, axis=1)
-        out[group] = df
-    return out
+
+# max_entries=1: only the group being viewed stays resident. Loading all six
+# together is what put the deployed app over its memory limit.
+@st.cache_data(max_entries=1, show_spinner='Loading position group...')
+def load_dashboard(group):
+    """One position group, with the `_`-prefixed filter columns precomputed.
+
+    Parquet returns the list columns as numpy arrays, which is what
+    pdash.as_list is built to take."""
+    df = pd.read_parquet(f'dashboard_{group}.parquet').reset_index(drop=True)
+    df['_name'] = df['player_name'].map(pdash.clean_str)
+    df['_team'] = df['team_name'].map(pdash.clean_str)
+    df['_role'] = df['position'].map(lambda v: pdash.clean_str(v, group))
+    df['_seasons'] = df['season_id'].map(pdash.as_list)
+    df['_comps'] = df['competition_id'].map(pdash.as_list)
+    df['_label'] = df.apply(pdash.stint_label, axis=1)
+    return df
 
 
 @st.cache_data
@@ -419,8 +449,6 @@ def load_player_table():
         return None
     return pd.read_csv(PLAYER_TABLE_CSV)
 
-
-set_pieces, team_table, df_atomic = load_data()
 
 # ──────────────────────────────────────────────
 # Sidebar — console with all controls
@@ -439,6 +467,7 @@ mode = st.sidebar.radio('Section:', [MODE_THROWINS, MODE_SCOUT],
                        index=0, label_visibility='collapsed')
 
 if mode == MODE_THROWINS:
+    set_pieces, team_table = load_data()
     available_competitions = sorted(set_pieces['competition_id'].unique().tolist())
 
     side_label('Competitions')
@@ -475,7 +504,7 @@ if mode == MODE_THROWINS:
 
 
     @st.cache_data(show_spinner='Calculating first contact statistics...')
-    def process_first_contact_data(competitions_tuple, df_atomic):
+    def process_first_contact_data(competitions_tuple):
         """Process atomic data for first contact analysis. Only recalculates when competitions change.
 
         max_vaep_next_5s = the highest vaep_value among the same team's later actions
@@ -484,7 +513,8 @@ if mode == MODE_THROWINS:
         per-row full-frame scan — same result, a fraction of the time and memory.
         """
         competitions = list(competitions_tuple)
-        dfa_atomic = df_atomic[df_atomic['competition_id'].isin(competitions)].copy()
+        dfa_atomic = read_slim('throwinsatomic2526.csv', ATOMIC_COLS)
+        dfa_atomic = dfa_atomic[dfa_atomic['competition_id'].isin(competitions)].copy()
 
         n = len(dfa_atomic)
         max_next = np.zeros(n, dtype=float)
@@ -520,9 +550,13 @@ if mode == MODE_THROWINS:
         first_contact['first_contact_ratio'] = first_contact['first_contact_won'] / first_contact['set_pieces']
         first_contact['set_pieces_per_game'] = first_contact['set_pieces'] / first_contact['games_played']
 
-        return first_contact, dfa_atomic
+        # Only throw-in rows and the five columns section 03 reads are kept —
+        # the rest of the atomic table is dropped rather than cached.
+        throw_ins = dfa_atomic[dfa_atomic['type_name'] == 'throw_in']
+        return first_contact, throw_ins[['team_name', 'type_name', 'x_a0',
+                                         'is_inbox', 'vaep_difference']].copy()
 
-    first_contact_data, dfa_atomic = process_first_contact_data(tuple(selected_competitions), df_atomic)
+    first_contact_data, dfa_atomic = process_first_contact_data(tuple(selected_competitions))
 
     # Remaining sidebar controls (options depend on filtered data)
     numeric_columns = [col for col in team_table.columns
@@ -559,7 +593,7 @@ if mode == MODE_THROWINS:
                                          label_visibility='collapsed') if available_teams else None
 
 else:
-    groups = load_dashboards()
+    groups = available_groups()
     scout_frame = scout_pool = pd.DataFrame()
     scout_group = scout_name = scout_season = scout_team = None
     scout_roles = []
@@ -572,7 +606,7 @@ else:
             'Position group:', sorted(groups), label_visibility='collapsed',
             format_func=lambda g: pdash.DASHBOARDS[g]['label'],
         )
-        scout_frame = groups[scout_group]
+        scout_frame = load_dashboard(scout_group)
 
         # Pool filters — these decide what the percentiles are measured against
         side_label('Pool — percentiles measured against')
